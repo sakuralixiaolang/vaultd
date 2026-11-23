@@ -8,6 +8,7 @@ package localcfg
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -126,12 +127,14 @@ func (c *Config) Configured() bool {
 	return c.WebDAVURL != "" && c.WebDAVUser != ""
 }
 
-// Fingerprint 返回密钥指纹（只用于 UI 核对，不可反推密钥）。
+// Fingerprint 返回密钥指纹：对主密钥做一次 SHA-256，取前 8 位。
+// 只用于在多台设备上核对「是不是同一把钥匙」，不含密钥本身、也不可反推。
 func (c *Config) Fingerprint() string {
 	if len(c.MasterKey) < 16 {
 		return ""
 	}
-	return strings.ToUpper(c.MasterKey[:8])
+	sum := sha256.Sum256([]byte(c.MasterKey))
+	return strings.ToUpper(hex.EncodeToString(sum[:4]))
 }
 
 func validHex(s string, bytes int) bool {

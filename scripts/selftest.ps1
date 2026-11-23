@@ -69,7 +69,7 @@ try {
     # 3) 首次运行是否自动生成了密钥
     $cfgPath = Join-Path $HomeDir 'config.json'
     $cfg = Get-Content $cfgPath -Raw | ConvertFrom-Json
-    Check '首次运行自动生成主密钥' ($cfg.master_key.Length -eq 64 -and $cfg.salt.Length -eq 64) "key=$($cfg.master_key.Substring(0,8))…"
+    Check '首次运行自动生成主密钥' ($cfg.master_key.Length -eq 64 -and $cfg.salt.Length -eq 64) "len=$($cfg.master_key.Length)（不打印密钥内容）"
 
     # 4) 接入（账号密码方式）
     $body = @{ url = "http://127.0.0.1:$DavPort"; user = 'test'; pass = 'testpass'; remote_path = 'vault'; chunk_size = '500Mi' } | ConvertTo-Json
@@ -77,9 +77,16 @@ try {
     Check 'WebDAV 接入成功' ($setup.ok -eq $true) ''
 
     # 5) 造 200MB 样本并流式上传
-    if (-not (Test-Path $BigFile)) { & fsutil file createnew $BigFile 209715200 | Out-Null }
+    if (-not (Test-Path $BigFile)) {
+        # 用 .NET 直接建定长文件，避免依赖 fsutil 是否在 PATH 里
+        $fs = [System.IO.File]::Create($BigFile)
+        $fs.SetLength(209715200)
+        $fs.Dispose()
+    }
     $size = (Get-Item $BigFile).Length
-    $up = & curl.exe -s -o NUL -w "%{http_code}" -X PUT --data-binary "@$BigFile" "$api/upload?path=sample200.bin&t=$token"
+    $curl = "$env:SystemRoot\System32\curl.exe"
+    if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
+    $up = & $curl -s -o NUL -w "%{http_code}" -X PUT --data-binary "@$BigFile" "$api/upload?path=sample200.bin&t=$token"
     Check '流式加密上传（200MB）' ($up -eq '200') "HTTP $up"
 
     # 6) 列表：应看到解密后的名字与真实大小
@@ -104,7 +111,7 @@ try {
     $end = $start + $want - 1
     $rngFile = Join-Path $Root 'range.bin'
     $sw = [Diagnostics.Stopwatch]::StartNew()
-    $hdr = & curl.exe -s -D - -o $rngFile -H "Range: bytes=$start-$end" "$api/stream?path=/sample200.bin&t=$token"
+    $hdr = & $curl -s -D - -o $rngFile -H "Range: bytes=$start-$end" "$api/stream?path=/sample200.bin&t=$token"
     $sw.Stop()
     $status = ($hdr | Select-String -Pattern '^HTTP/\d\.\d (\d{3})').Matches[0].Groups[1].Value
     $cr = ($hdr | Select-String -Pattern '^Content-Range: (.*)').Matches[0].Groups[1].Value.Trim()
@@ -138,7 +145,11 @@ try {
     $base2 = ($url2 -split '\?')[0].TrimEnd('/')
     $tok2 = ($url2 -split 't=')[1]
     $status2 = Invoke-RestMethod -Uri "$base2/api/status?t=$tok2"
-    Check '重启后密钥指纹不变' ($status2.key_fingerprint -eq $cfg.master_key.Substring(0, 8).ToUpper()) "fp=$($status2.key_fingerprint)"
+    # 指纹 = SHA-256(主密钥) 前 4 字节，不含密钥本身
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $fpBytes = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($cfg.master_key))
+    $expectFp = (($fpBytes[0..3] | ForEach-Object { $_.ToString('X2') }) -join '')
+    Check '重启后密钥指纹不变' ($status2.key_fingerprint -eq $expectFp) "fp=$($status2.key_fingerprint)"
     Check '重启后密文库仍可用' ($status2.vault_ready -eq $true) "vault_ready=$($status2.vault_ready)"
     Stop-Process -Id $app2.Id -Force
 }

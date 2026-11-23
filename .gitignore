@@ -4,6 +4,17 @@ bin/
 *.dll
 *.pdb
 
+# Android 构建中间物与产物（AAR / APK / keystore 一律不入库）
+android/build/
+android/app/build/
+android/app/libs/*.aar
+android/app/libs/*.jar
+android/local.properties
+*.aar
+*.apk
+*.keystore
+*.jks
+
 # 本机配置与凭据：一律不入库、不进 Release
 config.json
 key.json

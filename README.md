@@ -12,21 +12,26 @@
 第一次启动时，若本机没有密钥，程序会生成 32 字节随机主密钥与盐，写入：
 
 ```
-Windows: %LOCALAPPDATA%\EncryptedVault\config.json
+Windows: %APPDATA%\EncryptedVault\config.json
 其他平台: 用户配置目录下的 EncryptedVault/config.json
 ```
 
+安卓端对应 `App 私有目录/files/config.json`（同样首次运行自动生成，用户无需任何操作）。
+
 **该文件不可外传。** 它同时保存主密钥和云端接入凭据；丢了它，云端密文再也解不开；泄露它，等于把库交出去。
+界面上显示的「密钥指纹」是主密钥的 SHA-256 前 8 位，只用来核对两台设备是不是同一把钥匙，不含密钥本身、也不可反推。
 仓库里只有 `config.example.json`（纯占位符，不含任何凭据、域名或密钥），`.gitignore` 已覆盖 `config.json`、`key.json`、`rclone.conf`、`.env` 等。
 
 ## 目录结构
 
 ```
 cmd/vaultd/            程序入口：监听 127.0.0.1，打印带 token 的地址
+mobile/                Go 移动绑定：把同一个网关跑在 App 进程里
 internal/localcfg/     本机配置 + 主密钥引导（首启生成、原子落盘）
 internal/vault/        chunker→crypt→webdav 三层组装，List/Upload/OpenRange
 internal/server/       Range 网关、上传、错误分类
 internal/webui/        内嵌前端（列表 / 相册 / 播放器）
+android/               单 Activity + WebView 壳、手工打包脚本（不依赖 Gradle）
 scripts/selftest.ps1   无需真实云盘的全链路自测
 docs/选型结论.md        阶段 0 的检索与选型依据
 ```
@@ -84,8 +89,63 @@ MVP 走本机 AList / OpenList 暴露的 WebDAV：
 | HEAD | 200 + `Accept-Ranges: bytes` + `Content-Type: video/mp4` |
 | 杀进程重启 | 密钥指纹不变，密文库仍可用 |
 
-> 以上是**本地模拟云端**的结果，链路语义与真实 WebDAV 一致；接入真实云盘后需再跑一遍验收用例表。
+> 以上是**本地模拟云端**的结果，链路语义与真实 WebDAV 一致。
 
+### 真实云盘实测（2026-11-22，云盘经本机 OpenList 的 WebDAV 驱动）
+
+| 项目 | 结果 |
+|---|---|
+| 40 MB 加密上传 | HTTP 200，耗时取决于上行带宽 |
+| 90% 位置取 1 MiB | **206**，`Content-Range: bytes <起点>-<终点>/<总长>`，首字节数百毫秒级 |
+| 该切片与源文件同区间 SHA256 | **一致** |
+| 云端落地对象 | 约 40 MB，前 8 字节 = `RCLONE` 魔数（云端只能看到密文） |
+| 列表 | 返回解密后的原名与原始大小 |
+
+## 安卓端（同一套内核）
+
+安卓端不是另写一套，而是把**同一个 Go 网关**跑在 App 进程里，WebView 加载同一个前端：
+
+```
+mobile/mobile.go               导出 start/stop/fingerprint/configured/saveWebDAV
+android/app/.../MainActivity   单 Activity + WebView；文件选择走 onShowFileChooser
+android/build-apk.ps1          不依赖 Gradle：aapt2 → javac → d8 → 塞 dex 与 lib/*.so → zipalign → apksigner
+```
+
+构建（先把 Go 侧绑定成 AAR，再打 APK）：
+
+```powershell
+$env:ANDROID_HOME      = "$env:LOCALAPPDATA\Android\Sdk"
+$env:ANDROID_NDK_HOME  = "C:\path\to\android-ndk-r27c"
+$env:JAVA_HOME         = "C:\Program Files\Android\Android Studio\jbr"
+go install golang.org/x/mobile/cmd/gobind@<go.mod 里的 x/mobile 版本>
+$t = 'android/arm64,android/amd64'
+gomobile bind -v -target $t -androidapi 24 -o android\app\libs\vaultd.aar .\mobile
+.\android\build-apk.ps1
+```
+
+产物：`bin/android/vault-android-debug.apk`（含 `arm64-v8a` 与 `x86_64`，可直接装机与跑模拟器）。
+
+### 手机怎么连云端
+
+App 里的网关只监听 `127.0.0.1`。手机要够到一个跑在别处的 OpenList，有两条路：
+
+1. **临时**：把 OpenList 的 `scheme.address` 从 `127.0.0.1` 改成 `0.0.0.0`（并在防火墙放行端口），App 内「接入设置」填电脑的局域网地址。注意这会把 OpenList 暴露到局域网。
+2. **彻底**：等阶段 3 的**内置网盘驱动**，手机上不再依赖 OpenList。
+
+模拟器联调时用 `http://10.0.2.2:5244/dav` 指向宿主机回环。
+
+### 安卓端实测（2026-11-23，模拟器，与 PC 同一把密钥）
+
+| 项目 | 结果 |
+|---|---|
+| 密钥指纹 | 与 PC 端完全一致（配置里没有再次生成） |
+| 列目录 | 解密出原名与原始大小（照片 / 大文件 / 视频各一个） |
+| 设备侧网关 90% 位置取 1 MiB | **206** + 正确 `Content-Range`，切片 SHA256 与 PC 源文件同区间**一致** |
+| 图片解密渲染 | 200、PNG 魔数、原图尺寸，WebView 正常显示 |
+| 视频跳 90% | `seeked` **1.66 s**、进入播放 `readyState=4`；页内探针显示「起播耗时 32 ms」 |
+
+> 调试技巧：debug 包默认打开 WebView 调试，`adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>` 后可直接在 DevTools 里看页面与网关请求。
+> 若模拟器改过 `wm size`（override 尺寸与截图像素不一致），`adb shell input tap` 要用 override 坐标，否则点不中。
 
 ## 已知边界
 

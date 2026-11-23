@@ -32,15 +32,27 @@ type Server struct {
 	cfg   *localcfg.Config
 	token string
 
-	mu sync.RWMutex
-	v  *vault.Vault
-	vErr error
+	mu         sync.RWMutex
+	v          *vault.Vault
+	vErr       error
+	lastRetry  time.Time
 }
 
 func New(cfg *localcfg.Config, token string) *Server {
 	s := &Server{cfg: cfg, token: token}
 	s.reload(context.Background())
 	return s
+}
+
+// wantReconnect 做一次 10 秒限流，避免前端反复轮询时反复发起重连。
+func (s *Server) wantReconnect() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if time.Since(s.lastRetry) < 10*time.Second {
+		return false
+	}
+	s.lastRetry = time.Now()
+	return true
 }
 
 // reload 重新建立密文库连接（配置变更后调用）。
@@ -133,6 +145,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if vErr != nil {
 		resp["vault_error"] = vErr.Error()
+	}
+	// 未就绪时在后台补一次重连（限流，10 秒最多一次），
+	// 手机开机后网络晚到、或笔记本刚从睡眠唤醒时，用户不用重启 App。
+	if v == nil && s.cfg.Configured() && s.wantReconnect() {
+		go func() {
+			if _, err := s.needVault(); err == nil {
+				log.Printf("后台重连成功，密文库已就绪")
+			}
+		}()
 	}
 	writeJSON(w, resp)
 }
@@ -317,17 +338,30 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) needVault() (*vault.Vault, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if !s.cfg.Configured() {
+	v, vErr, configured := s.v, s.vErr, s.cfg.Configured()
+	s.mu.RUnlock()
+	if !configured {
 		return nil, errors.New("尚未配置云端接入信息")
 	}
-	if s.vErr != nil {
-		return nil, s.vErr
+	if vErr == nil && v != nil {
+		return v, nil
 	}
-	if s.v == nil {
-		return nil, errors.New("密文库未就绪")
+	// 手机/笔记本上网络常常比进程晚就绪：失败一次不代表真连不上。
+	// 这里做一次带退避的重连，成功就恢复，避免用户必须重启 App。
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.v != nil && s.vErr == nil {
+		return s.v, nil
 	}
-	return s.v, nil
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	vv, err := vault.Open(ctx, s.cfg)
+	if err != nil {
+		s.v, s.vErr = nil, err
+		return nil, err
+	}
+	s.v, s.vErr = vv, nil
+	return vv, nil
 }
 
 // ---------- Range 解析 ----------

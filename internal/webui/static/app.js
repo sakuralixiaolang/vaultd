@@ -1,7 +1,7 @@
 // 前端只需三件事：列目录、流式上传、把播放器的 Range 请求打回本地网关。
 // 所有解密都发生在网关里，浏览器永远拿不到密钥。
 
-const state = { cwd: "", entries: [], configured: false };
+const state = { cwd: "", entries: [], configured: false, vaultReady: null };
 const $ = (id) => document.getElementById(id);
 
 const fmtSize = (n) => {
@@ -30,6 +30,7 @@ async function api(url, opts) {
 async function loadStatus() {
   const s = await api("/api/status");
   state.configured = s.configured;
+  state.vaultReady = !!s.vault_ready;
   $("keyfp").textContent = s.key_fingerprint ? "密钥 " + s.key_fingerprint + "…" : "";
   const dot = $("health");
   dot.className = "dot " + (s.vault_ready ? "ok" : s.configured ? "err" : "");
@@ -52,6 +53,12 @@ async function loadList() {
   const files = state.entries.length - dirs;
   $("count").textContent = dirs || files ? `（${dirs} 个目录 / ${files} 个文件）` : "";
   renderList();
+  // 列表既然拉到了，说明后台自己连上了；把状态与错误面板同步过来，
+  // 否则手机开机网络晚到时会一直挂着「连接失败」的提示。
+  if (state.vaultReady === false) {
+    state.vaultReady = true;
+    loadStatus().catch(() => {});
+  }
 }
 
 function renderList() {
