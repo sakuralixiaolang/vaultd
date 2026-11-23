@@ -105,6 +105,19 @@ func splitAuth(authorization string) (prefix, account, token string, expireMS in
 	return parts[0], parts[1], parts[2], exp, nil
 }
 
+// CheckAuthorization 在保存前做一次纯本地校验：能解码、分成三段、带过期时间。
+// 不发网络请求，避免把“格式不对”拖到连接阶段才暴露。
+func CheckAuthorization(auth string) error {
+	_, _, _, exp, err := splitAuth(strings.TrimSpace(auth))
+	if err != nil {
+		return err
+	}
+	if time.Now().UnixMilli() > exp {
+		return errors.New("授权串已过期，请重新登录获取")
+	}
+	return nil
+}
+
 func (c *Client) refreshIfNeeded(ctx context.Context) error {
 	c.mu.Lock()
 	auth := c.auth

@@ -161,6 +161,9 @@ func (c *Config) Fingerprint() string {
 	return strings.ToUpper(hex.EncodeToString(sum[:4]))
 }
 
+// ValidKeyHex 校验一段 32 字节的 hex 字符串（主密钥/盐都是这种形状）。
+func ValidKeyHex(s string) bool { return validHex(s, 32) }
+
 func validHex(s string, bytes int) bool {
 	if len(s) != bytes*2 {
 		return false

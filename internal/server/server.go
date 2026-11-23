@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"vaultd/internal/cloud139"
 	"vaultd/internal/localcfg"
 	"vaultd/internal/vault"
 	"vaultd/internal/webui"
@@ -293,6 +294,14 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 type setupReq struct {
+	// 内置直连（native）用到的字段
+	Backend       string `json:"backend"`
+	CloudProvider string `json:"cloud_provider"`
+	CloudAuth     string `json:"cloud_authorization"`
+	// 新设备导入同一把钥匙时用（留空表示不改动）
+	MasterKey string `json:"master_key"`
+	Salt      string `json:"salt"`
+
 	URL        string `json:"url"`
 	User       string `json:"user"`
 	Pass       string `json:"pass"`
@@ -311,17 +320,45 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	if req.URL == "" || req.User == "" {
-		writeErr(w, errors.New("WebDAV 地址与用户名必填"))
-		return
+
+	// 密钥导入：只接受成对出现、形状正确的 32 字节 hex。
+	// 这一步会改变“能不能解开云端已有密文”，所以宁可不写也不写错一半。
+	if req.MasterKey != "" || req.Salt != "" {
+		if !localcfg.ValidKeyHex(req.MasterKey) || !localcfg.ValidKeyHex(req.Salt) {
+			writeErr(w, errors.New("主密钥与盐必须同时提供，且各是 64 位 hex（32 字节）"))
+			return
+		}
+		s.cfg.MasterKey, s.cfg.Salt = req.MasterKey, req.Salt
 	}
-	if !strings.HasPrefix(req.URL, "http://") && !strings.HasPrefix(req.URL, "https://") {
-		writeErr(w, errors.New("WebDAV 地址必须是 http(s) 开头"))
-		return
+
+	if req.Backend == "native" {
+		if req.CloudProvider != "" && req.CloudProvider != "139" {
+			writeErr(w, fmt.Errorf("暂不支持的云盘类型: %s", req.CloudProvider))
+			return
+		}
+		if err := cloud139.CheckAuthorization(req.CloudAuth); err != nil {
+			writeErr(w, fmt.Errorf("授权串不可用: %w", err))
+			return
+		}
+		s.cfg.Backend = "native"
+		s.cfg.CloudProvider = "139"
+		s.cfg.CloudAuth = strings.TrimSpace(req.CloudAuth)
+		s.cfg.WebDAVURL, s.cfg.WebDAVUser, s.cfg.WebDAVPass = "", "", ""
+	} else {
+		if req.URL == "" || req.User == "" {
+			writeErr(w, errors.New("WebDAV 地址与用户名必填"))
+			return
+		}
+		if !strings.HasPrefix(req.URL, "http://") && !strings.HasPrefix(req.URL, "https://") {
+			writeErr(w, errors.New("WebDAV 地址必须是 http(s) 开头"))
+			return
+		}
+		s.cfg.Backend = ""
+		s.cfg.CloudAuth = ""
+		s.cfg.WebDAVURL = req.URL
+		s.cfg.WebDAVUser = req.User
+		s.cfg.WebDAVPass = req.Pass
 	}
-	s.cfg.WebDAVURL = req.URL
-	s.cfg.WebDAVUser = req.User
-	s.cfg.WebDAVPass = req.Pass
 	if req.RemotePath != "" {
 		s.cfg.RemotePath = strings.Trim(req.RemotePath, "/")
 	}
@@ -340,7 +377,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fmt.Errorf("配置已保存，但连接失败: %w", vErr))
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true})
+	writeJSON(w, map[string]any{"ok": true, "fingerprint": s.cfg.Fingerprint(), "backend": s.cfg.BackendName()})
 }
 
 func (s *Server) needVault() (*vault.Vault, error) {

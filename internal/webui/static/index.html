@@ -22,9 +22,23 @@
 <main>
   <section id="setupPanel" class="panel hidden">
     <h2 id="setupTitle">云端接入（本机 AList / OpenList 的 WebDAV）</h2>
-    <p class="hint">目标存储必须开启「Web 代理 / WebDAV 本地代理」，否则 Range 不成立，视频无法拖动。</p>
+    <p id="webdavHint" class="hint">目标存储必须开启「Web 代理 / WebDAV 本地代理」，否则 Range 不成立，视频无法拖动。</p>
     <p id="nativeNote" class="hint hidden">当前是<b>内置驱动</b>：网关直接连云端，不需要任何外部 WebDAV 进程。
-      换账号请修改本机配置里的 <code>cloud_authorization</code>，改完重启即可；密钥不变、云端数据也不用迁移。</p>
+      换账号或在新设备上首次接入，把 PC 端配置里的三样东西贴下面即可；密钥填成同一个，云端已有密文就能直接解开。</p>
+    <div class="row"><button id="btnNativeToggle" class="ghost hidden">换账号 / 导入</button></div>
+    <div id="nativeForm" class="hidden">
+      <div class="grid">
+        <label>云端授权串<textarea id="fAuth" rows="3" placeholder="粘贴 config.json 里的 cloud_authorization（base64 一长串）"></textarea></label>
+        <label>主密钥（可留空）<input id="fKey" placeholder="64 位 hex；新设备要导入同一把钥匙时填" autocomplete="off"></label>
+        <label>盐（可留空）<input id="fSalt" placeholder="64 位 hex；与主密钥成对" autocomplete="off"></label>
+        <label>密文根目录<input id="fRemoteN" placeholder="vault" value="vault" autocomplete="off"></label>
+        <label>分片大小<input id="fChunkN" placeholder="500Mi" value="500Mi" autocomplete="off"></label>
+      </div>
+      <div class="row">
+        <button id="btnSaveCloud" class="primary">保存并连接</button>
+        <span id="cloudMsg" class="muted"></span>
+      </div>
+    </div>
     <div id="webdavForm">
       <div class="grid">
         <label>WebDAV 地址<input id="fUrl" placeholder="http://127.0.0.1:5244/dav" autocomplete="off"></label>

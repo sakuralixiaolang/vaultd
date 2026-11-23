@@ -1,7 +1,7 @@
 // 前端只需三件事：列目录、流式上传、把播放器的 Range 请求打回本地网关。
 // 所有解密都发生在网关里，浏览器永远拿不到密钥。
 
-const state = { cwd: "", entries: [], configured: false, vaultReady: null };
+const state = { cwd: "", entries: [], configured: false, vaultReady: null, nativeFormOpen: false };
 const $ = (id) => document.getElementById(id);
 
 const fmtSize = (n) => {
@@ -36,13 +36,17 @@ async function loadStatus() {
   dot.className = "dot " + (s.vault_ready ? "ok" : s.configured ? "err" : "");
   $("setupPanel").classList.toggle("hidden", !!s.configured && !!s.vault_ready);
   if (s.vault_error) $("setupMsg").textContent = "连接失败：" + s.vault_error;
-  // 内置驱动模式下不再需要填 WebDAV，直接换成一段说明，避免误导用户去填没用过的地址
+  // 内置驱动模式下不再需要填 WebDAV，改成「贴授权串 / 导入密钥」的表单
   const isNative = (s.backend || "").indexOf("内置") === 0;
   $("setupTitle").textContent = isNative
     ? "云端接入（" + s.backend + "）"
     : "云端接入（本机 AList / OpenList 的 WebDAV）";
   $("webdavForm").classList.toggle("hidden", isNative);
+  $("webdavHint").classList.toggle("hidden", isNative);
   $("nativeNote").classList.toggle("hidden", !isNative);
+  const showNativeForm = isNative && (!s.configured || state.nativeFormOpen);
+  $("nativeForm").classList.toggle("hidden", !showNativeForm);
+  $("btnNativeToggle").classList.toggle("hidden", !(isNative && s.configured));
   if (s.configured && !isNative) {
     $("fUrl").value = s.webdav_url || $("fUrl").value;
     $("fRemote").value = s.remote_path || "vault";
@@ -184,6 +188,39 @@ $("btnUp").addEventListener("click", () => {
   loadList();
 });
 $("btnSetup").addEventListener("click", () => $("setupPanel").classList.toggle("hidden"));
+
+$("btnNativeToggle").addEventListener("click", () => {
+  state.nativeFormOpen = !state.nativeFormOpen;
+  $("nativeForm").classList.toggle("hidden", !state.nativeFormOpen);
+});
+
+$("btnSaveCloud").addEventListener("click", async () => {
+  const payload = {
+    backend: "native",
+    cloud_provider: "139",
+    cloud_authorization: $("fAuth").value.trim(),
+    master_key: $("fKey").value.trim(),
+    salt: $("fSalt").value.trim(),
+    remote_path: $("fRemoteN").value.trim() || "vault",
+    chunk_size: $("fChunkN").value.trim() || "500Mi",
+  };
+  $("cloudMsg").textContent = "连接中…";
+  try {
+    const r = await api("/api/setup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    $("cloudMsg").textContent = "";
+    $("fAuth").value = "";
+    state.nativeFormOpen = false;
+    await loadStatus();
+    await loadList();
+    $("keyfp").textContent = r && r.fingerprint ? "密钥 " + r.fingerprint + "…" : $("keyfp").textContent;
+  } catch (err) {
+    $("cloudMsg").textContent = "失败：" + err.message;
+  }
+});
 
 $("btnSave").addEventListener("click", async () => {
   const payload = {
