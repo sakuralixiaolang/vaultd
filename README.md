@@ -28,11 +28,15 @@ Windows: %APPDATA%\EncryptedVault\config.json
 cmd/vaultd/            程序入口：监听 127.0.0.1，打印带 token 的地址
 mobile/                Go 移动绑定：把同一个网关跑在 App 进程里
 internal/localcfg/     本机配置 + 主密钥引导（首启生成、原子落盘）
+internal/cloud139/     内置个人云客户端（路由/列表/直链/Range 读/分片上传/改名/删除）
+internal/dav/          进程内最小 WebDAV 服务，把云盘接口翻译成 rclone 认识的文件系统
 internal/vault/        chunker→crypt→webdav 三层组装，List/Upload/OpenRange
 internal/server/       Range 网关、上传、错误分类
 internal/webui/        内嵌前端（列表 / 相册 / 播放器）
 android/               单 Activity + WebView 壳、手工打包脚本（不依赖 Gradle）
 scripts/selftest.ps1   无需真实云盘的全链路自测
+scripts/build-aar.ps1  重建安卓 Go 绑定
+scripts/native_accept.ps1  内置驱动端到端验收（40 MB 上传 + 90% Range）
 docs/选型结论.md        阶段 0 的检索与选型依据
 ```
 
@@ -48,7 +52,30 @@ go build -o bin\vaultd.exe .\cmd\vaultd
 启动后控制台会打印形如 `http://127.0.0.1:53211/?t=<token>` 的地址，浏览器打开即可。
 token 只用于挡住本机其它进程，不是你的密码；每次启动都重新生成。
 
-## 接入要求（关键）
+## 接入方式（两种，二选一）
+
+### A. 内置直连（默认形态，PC 与手机都不需要外部进程）
+
+`config.json` 里：
+
+```json
+{
+  "backend": "native",
+  "cloud_provider": "139",
+  "cloud_authorization": "<登录后得到的 base64 授权串>",
+  "remote_path": "vault"
+}
+```
+
+- `cloud_authorization` 由登录流程得到（`Authorization` 头的原文），**只存本机、不入仓库**；
+  剩余有效期不足 15 天时客户端会自动调刷新接口换新，并把新串回写配置。
+- 授权串里带着账号与过期时间，解码规则见 `internal/cloud139/client.go` 的 `splitAuth`。
+- 这一形态下 rclone 的 `webdav` 层指向进程内 `127.0.0.1:<随机端口>`，由 `internal/dav` 直连云盘；
+  端口随进程生命周期存在，口令随机生成，进程退出即失效。
+
+安卓侧同一个内核，App 私有目录放同一份配置即可（`SaveCloud("139", auth)` 也可由原生设置页调用）。
+
+### B. 外部 WebDAV（旧形态，仍保留）
 
 MVP 走本机 AList / OpenList 暴露的 WebDAV：
 
@@ -101,7 +128,33 @@ MVP 走本机 AList / OpenList 暴露的 WebDAV：
 | 云端落地对象 | 约 40 MB，前 8 字节 = `RCLONE` 魔数（云端只能看到密文） |
 | 列表 | 返回解密后的原名与原始大小 |
 
+### 内置驱动实测（2026-11-23，`backend=native`，**全程没有 OpenList 进程**）
+
+| 项目 | 结果 |
+|---|---|
+| 鉴权与路由 | `qryRoutePolicy` 下发 `personal-*` 主机，全程只用授权串，不存 Cookie |
+| 列目录 | 根目录数十项、`vault` 下若干密文对象，名字与大小与旧路径完全一致 |
+| 40 MB 加密上传 | HTTP 200；耗时与链路带宽相关，与 OpenList 路径同量级 |
+| 90% 位置取 1 MiB | **206**，`Content-Range` 起点正确，切片 SHA256 与源文件**一致** |
+| 首 100 KB | 冷启动数秒（含建连），热连接亚秒级 |
+| 云端对象 | 新对象名是一串 base32 乱码，大小与源文件同量级，头 8 字节 `RCLONE` |
+| 建目录幂等 | 重复 MKCOL 返回 405，不再产生 `vault_<时间戳>` 影子目录（修掉了 `force_rename` 的坑） |
+| 改名（chunker 收尾） | `POST /file/update` 原地改名，避免多余的服务器端拷贝 |
+| 安卓端（native 配置） | 同一把钥匙（指纹与 PC 一致）、列表可见、点开图片正常解密渲染 |
+
+客户端实现要点（均可对照 `internal/cloud139`）：
+
+- 路由：`POST https://user-njs.yun.139.com/user/route/qryRoutePolicy`，取 `modName=personal` 的 `httpsUrl`。
+- 列表：`POST {host}/file/list`，`pageCursor` 翻页到空为止；`type=="folder"` 视为目录。
+- 下载：`POST {host}/file/getDownloadUrl`，`cdnSwitch=true` 用 `cdnUrl` 否则 `url`；网关把 `Range` 头原样透传给 CDN。
+- 上传：`/file/create`（先算 SHA256）→ 分片 `PUT` → 超过 100 片用 `/file/getUploadUrl` 追加 → `/file/complete`；分片 100 MB，>30 GB 时 512 MB。
+- 建目录：`/file/create` `type=folder`；删除：`/recyclebin/batchTrash`。
+- 通用头与签名：`Mcloud-Sign: <ts>,<rand>,<sig>`，签名 = `urlencode(body)` 按字符排序 → base64 → `MD5` 两轮后大写。
+
+> 接口行为通过阅读 OpenList 的 139 驱动源码确认；这里是与它**独立实现**的最小客户端，没有把 AGPL 代码搬进本仓库。
+
 ## 安卓端（同一套内核）
+
 
 安卓端不是另写一套，而是把**同一个 Go 网关**跑在 App 进程里，WebView 加载同一个前端：
 
@@ -127,12 +180,13 @@ gomobile bind -v -target $t -androidapi 24 -o android\app\libs\vaultd.aar .\mobi
 
 ### 手机怎么连云端
 
-App 里的网关只监听 `127.0.0.1`。手机要够到一个跑在别处的 OpenList，有两条路：
+内置驱动形态下，手机**不需要**够到任何跑在别处的进程：网关、云盘客户端都在 App 进程内，
+App 私有目录的 `config.json` 里放 `backend=native` + `cloud_provider=139` + `cloud_authorization` 即可。
+
+只有回到旧形态（`backend` 为空、走外部 WebDAV）时，才需要让手机够到电脑上的 OpenList：
 
 1. **临时**：把 OpenList 的 `scheme.address` 从 `127.0.0.1` 改成 `0.0.0.0`（并在防火墙放行端口），App 内「接入设置」填电脑的局域网地址。注意这会把 OpenList 暴露到局域网。
-2. **彻底**：等阶段 3 的**内置网盘驱动**，手机上不再依赖 OpenList。
-
-模拟器联调时用 `http://10.0.2.2:5244/dav` 指向宿主机回环。
+2. 模拟器联调时用 `http://10.0.2.2:5244/dav` 指向宿主机回环。
 
 ### 安卓端实测（2026-11-23，模拟器，与 PC 同一把密钥）
 
@@ -143,6 +197,7 @@ App 里的网关只监听 `127.0.0.1`。手机要够到一个跑在别处的 Ope
 | 设备侧网关 90% 位置取 1 MiB | **206** + 正确 `Content-Range`，切片 SHA256 与 PC 源文件同区间**一致** |
 | 图片解密渲染 | 200、PNG 魔数、原图尺寸，WebView 正常显示 |
 | 视频跳 90% | `seeked` **1.66 s**、进入播放 `readyState=4`；页内探针显示「起播耗时 32 ms」 |
+| 内置驱动（native 配置，无 OpenList） | 指纹与 PC 一致、列表若干项，点开图片解密渲染正常 |
 
 > 调试技巧：debug 包默认打开 WebView 调试，`adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>` 后可直接在 DevTools 里看页面与网关请求。
 > 若模拟器改过 `wm size`（override 尺寸与截图像素不一致），`adb shell input tap` 要用 override 坐标，否则点不中。
@@ -151,6 +206,8 @@ App 里的网关只监听 `127.0.0.1`。手机要够到一个跑在别处的 Ope
 
 - 文件名是**确定性加密**：同名文件密文名相同，云端能看出"两个目录有同名文件"和目录树形状。这是 rclone 格式的固有代价。
 - 文件长度（16 字节精度）和修改时间不加密，云端知道你存了多大、什么时候传的。
-- 断点粒度 = 分片大小（500 MiB）；片内失败要整片重传。真正的细粒度断点留给后续自建驱动阶段。
-- 阶段 3 会把 OpenList 换成本机内置驱动，**云端数据不用迁移**：加密格式与分片布局保持不变。
+- 断点粒度 = 分片大小（500 MiB）；片内失败要整片重传。上传时会先落一份临时文件到本机（为了算 SHA256 与分片重传），所以本机磁盘要留出与待传文件等量的空间。
+- 内置驱动只实现了个人云（`personal_new`）的读路径、上传、建目录、改名、删除；群组云、分享链接、秒传失败后的"覆盖同名"策略尚未接入。
+- 云端上传速率受链路影响很大：同样 40 MB，顺畅时 13 s，拥塞时段 70～130 s（与 OpenList 轮路对照结果一致，不是驱动实现的问题）。
+- 跨目录移动（MOVE 到另一个目录）返回 501；当前拓扑里 chunker 只做原地改名，用不到它。
 

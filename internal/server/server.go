@@ -60,12 +60,18 @@ func (s *Server) reload(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.cfg.Configured() {
+		if s.v != nil {
+			s.v.Close()
+		}
 		s.v, s.vErr = nil, nil
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	v, err := vault.Open(ctx, s.cfg)
+	if err == nil && s.v != nil && s.v != v {
+		s.v.Close() // native 模式下旧实例占着进程内端点，必须释放
+	}
 	s.v, s.vErr = v, err
 }
 
@@ -137,6 +143,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.mu.RUnlock()
 	resp := map[string]any{
 		"configured":      s.cfg.Configured(),
+		"backend":         s.cfg.BackendName(),
 		"webdav_url":      s.cfg.WebDAVURL,
 		"key_fingerprint": s.cfg.Fingerprint(),
 		"remote_path":     s.cfg.RemotePath,
@@ -202,7 +209,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, fmt.Errorf("上传失败: %w", err))
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "path": "/" + remote, "size": size})
+	writeJSON(w, map[string]any{"ok": true, "path": path.Join("/", remote), "size": size})
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {

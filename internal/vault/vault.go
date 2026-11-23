@@ -10,6 +10,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
+	"net/http"
 	"path"
 	"strings"
 	"time"
@@ -21,6 +23,8 @@ import (
 	"github.com/rclone/rclone/fs/config/obscure"
 	"github.com/rclone/rclone/fs/object"
 
+	"vaultd/internal/cloud139"
+	"vaultd/internal/dav"
 	"vaultd/internal/localcfg"
 )
 
@@ -34,8 +38,9 @@ type Entry struct {
 }
 
 type Vault struct {
-	f    fs.Fs
-	conn string
+	f      fs.Fs
+	conn   string
+	closer io.Closer
 }
 
 // ConnectionString 组装 chunker(crypt(webdav)) 三层。
@@ -87,21 +92,68 @@ func ConnectionString(c *localcfg.Config) (string, error) {
 }
 
 // Open 建立密文库。首次调用会顺带创建云端根目录。
+//
+// native 模式下不需要任何外部常驻进程：这里在进程内起一个最小的 WebDAV
+// 端点（直连云盘），再把 rclone 的 webdav 层指向 127.0.0.1 上的这个端点。
 func Open(ctx context.Context, c *localcfg.Config) (*Vault, error) {
-	conn, err := ConnectionString(c)
+	local := *c
+	var closer io.Closer
+
+	if c.Backend == "native" {
+		if c.CloudProvider != "" && c.CloudProvider != "139" {
+			return nil, fmt.Errorf("暂不支持的云盘类型: %s", c.CloudProvider)
+		}
+		hc := &http.Client{Timeout: 0}
+		cl, err := cloud139.New(c.CloudAuth, hc, func(newAuth string) {
+			c.CloudAuth = newAuth
+			if err := c.Save(); err != nil {
+				log.Printf("回写云端授权失败: %v", err)
+			}
+		})
+		if err != nil {
+			return nil, err
+		}
+		if err := cl.Start(ctx); err != nil {
+			return nil, fmt.Errorf("云端鉴权失败: %w", err)
+		}
+		ds := dav.New(cl)
+		base, err := ds.Start()
+		if err != nil {
+			return nil, err
+		}
+		closer = ds
+		local.WebDAVURL = base
+		local.WebDAVUser = ds.User
+		local.WebDAVPass = ds.Pass
+	}
+
+	conn, err := ConnectionString(&local)
 	if err != nil {
+		if closer != nil {
+			_ = closer.Close()
+		}
 		return nil, err
 	}
 	f, err := fs.NewFs(ctx, conn)
 	if err != nil {
+		if closer != nil {
+			_ = closer.Close()
+		}
 		return nil, fmt.Errorf("无法连接云端: %w", err)
 	}
-	v := &Vault{f: f, conn: conn}
+	v := &Vault{f: f, conn: conn, closer: closer}
 	if err := v.f.Mkdir(ctx, ""); err != nil {
 		// 目录已存在时不同后端报错不一致，这里不当作致命错误
 		fs.Logf(v.f, "确保根目录存在时返回: %v", err)
 	}
 	return v, nil
+}
+
+// Close 释放 native 模式下进程内的 WebDAV 端点。
+func (v *Vault) Close() {
+	if v != nil && v.closer != nil {
+		_ = v.closer.Close()
+	}
 }
 
 // List 列出目录。dir 用 '/'-分隔的相对路径，根为 ""。

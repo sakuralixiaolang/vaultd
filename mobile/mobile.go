@@ -106,6 +106,29 @@ func Configured() bool {
 	return cfg.Configured()
 }
 
+// SaveCloud 切换成「内置直连云盘」：只写授权串，不再需要外部 WebDAV 进程。
+// provider 目前只有 "139"；authorization 是从登录流程拿到的 base64 串。
+func SaveCloud(provider, authorization string) error {
+	if provider == "" {
+		provider = "139"
+	}
+	if provider != "139" {
+		return fmt.Errorf("暂不支持的云盘: %s", provider)
+	}
+	if authorization == "" {
+		return errors.New("授权串不能为空")
+	}
+	cfg, err := localcfg.Load()
+	if err != nil {
+		return err
+	}
+	cfg.Backend = "native"
+	cfg.CloudProvider = provider
+	cfg.CloudAuth = authorization
+	cfg.WebDAVURL, cfg.WebDAVUser, cfg.WebDAVPass = "", "", ""
+	return cfg.Save()
+}
+
 // SaveWebDAV 写入云端接入信息并落盘（供原生设置页使用；
 // 若不实现原生设置页，直接用 WebView 里的 /api/setup 亦可）。
 func SaveWebDAV(url, user, pass, remotePath string) error {
@@ -116,6 +139,7 @@ func SaveWebDAV(url, user, pass, remotePath string) error {
 	if url == "" || user == "" {
 		return errors.New("WebDAV 地址与用户名不能为空")
 	}
+	cfg.Backend = "" // 切回外部 WebDAV 模式
 	cfg.WebDAVURL = url
 	cfg.WebDAVUser = user
 	cfg.WebDAVPass = pass

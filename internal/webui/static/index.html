@@ -21,18 +21,22 @@
 
 <main>
   <section id="setupPanel" class="panel hidden">
-    <h2>云端接入（本机 AList / OpenList 的 WebDAV）</h2>
+    <h2 id="setupTitle">云端接入（本机 AList / OpenList 的 WebDAV）</h2>
     <p class="hint">目标存储必须开启「Web 代理 / WebDAV 本地代理」，否则 Range 不成立，视频无法拖动。</p>
-    <div class="grid">
-      <label>WebDAV 地址<input id="fUrl" placeholder="http://127.0.0.1:5244/dav" autocomplete="off"></label>
-      <label>用户名<input id="fUser" placeholder="openlist 账号" autocomplete="off"></label>
-      <label>密码<input id="fPass" type="password" placeholder="openlist 密码" autocomplete="off"></label>
-      <label>密文根目录<input id="fRemote" placeholder="vault" value="vault" autocomplete="off"></label>
-      <label>分片大小<input id="fChunk" placeholder="500Mi" value="500Mi" autocomplete="off"></label>
-    </div>
-    <div class="row">
-      <button id="btnSave" class="primary">保存并连接</button>
-      <span id="setupMsg" class="muted"></span>
+    <p id="nativeNote" class="hint hidden">当前是<b>内置驱动</b>：网关直接连云端，不需要任何外部 WebDAV 进程。
+      换账号请修改本机配置里的 <code>cloud_authorization</code>，改完重启即可；密钥不变、云端数据也不用迁移。</p>
+    <div id="webdavForm">
+      <div class="grid">
+        <label>WebDAV 地址<input id="fUrl" placeholder="http://127.0.0.1:5244/dav" autocomplete="off"></label>
+        <label>用户名<input id="fUser" placeholder="openlist 账号" autocomplete="off"></label>
+        <label>密码<input id="fPass" type="password" placeholder="openlist 密码" autocomplete="off"></label>
+        <label>密文根目录<input id="fRemote" placeholder="vault" value="vault" autocomplete="off"></label>
+        <label>分片大小<input id="fChunk" placeholder="500Mi" value="500Mi" autocomplete="off"></label>
+      </div>
+      <div class="row">
+        <button id="btnSave" class="primary">保存并连接</button>
+        <span id="setupMsg" class="muted"></span>
+      </div>
     </div>
   </section>
 

@@ -36,7 +36,14 @@ async function loadStatus() {
   dot.className = "dot " + (s.vault_ready ? "ok" : s.configured ? "err" : "");
   $("setupPanel").classList.toggle("hidden", !!s.configured && !!s.vault_ready);
   if (s.vault_error) $("setupMsg").textContent = "连接失败：" + s.vault_error;
-  if (s.configured) {
+  // 内置驱动模式下不再需要填 WebDAV，直接换成一段说明，避免误导用户去填没用过的地址
+  const isNative = (s.backend || "").indexOf("内置") === 0;
+  $("setupTitle").textContent = isNative
+    ? "云端接入（" + s.backend + "）"
+    : "云端接入（本机 AList / OpenList 的 WebDAV）";
+  $("webdavForm").classList.toggle("hidden", isNative);
+  $("nativeNote").classList.toggle("hidden", !isNative);
+  if (s.configured && !isNative) {
     $("fUrl").value = s.webdav_url || $("fUrl").value;
     $("fRemote").value = s.remote_path || "vault";
     $("fChunk").value = s.chunk_size || "500Mi";

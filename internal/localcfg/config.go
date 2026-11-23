@@ -20,6 +20,13 @@ import (
 
 // Config 是本机唯一的凭据/密钥载体。整个文件都在 .gitignore 覆盖范围内。
 type Config struct {
+	// 接入方式：webdav = 外部 WebDAV（历史形态）；native = 进程内直连云盘
+	Backend string `json:"backend,omitempty"`
+	// native 模式的云盘授权串（base64），由首次登录得到；刷新后会回写
+	CloudAuth string `json:"cloud_authorization,omitempty"`
+	// native 模式的云盘类型，目前支持 139
+	CloudProvider string `json:"cloud_provider,omitempty"`
+
 	// WebDAV 接入点（本机 AList/OpenList 暴露的地址，必须开启 Web 代理以确保 Range 生效）
 	WebDAVURL  string `json:"webdav_url"`
 	WebDAVUser string `json:"webdav_user"`
@@ -122,9 +129,26 @@ func (c *Config) Save() error {
 	return os.Rename(tmp, Path())
 }
 
-// Configured 表示是否已填好 WebDAV 接入信息。
+// Configured 表示接入信息是否齐备（native 模式看授权串）。
 func (c *Config) Configured() bool {
+	if c.Backend == "native" {
+		return c.CloudAuth != ""
+	}
 	return c.WebDAVURL != "" && c.WebDAVUser != ""
+}
+
+// BackendName 返回人类可读的接入方式。
+func (c *Config) BackendName() string {
+	if c.Backend == "native" {
+		return "内置直连（" + c.CloudProvider + "）"
+	}
+	return "外部 WebDAV"
+}
+
+// ClearCloud 清掉授权与接入信息（换账号/退出时用）。
+func (c *Config) ClearCloud() {
+	c.CloudAuth = ""
+	c.WebDAVURL, c.WebDAVUser, c.WebDAVPass = "", "", ""
 }
 
 // Fingerprint 返回密钥指纹：对主密钥做一次 SHA-256，取前 8 位。
