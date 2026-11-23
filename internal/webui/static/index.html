@@ -2,7 +2,8 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1419">
 <title>密文相册</title>
 <link rel="stylesheet" href="/style.css">
 </head>
@@ -14,10 +15,13 @@
     <span class="muted" id="keyfp"></span>
   </div>
   <nav>
-    <span class="muted" id="pathbar">/</span>
-    <button id="btnSetup" class="ghost">接入设置</button>
+    <button id="btnSetup" class="ghost tap">设置</button>
   </nav>
 </header>
+
+<div class="pathbar-wrap">
+  <button id="pathbar" class="pathbar" title="回到根目录">/</button>
+</div>
 
 <main>
   <section id="setupPanel" class="panel hidden">
@@ -25,7 +29,7 @@
     <p id="webdavHint" class="hint">目标存储必须开启「Web 代理 / WebDAV 本地代理」，否则 Range 不成立，视频无法拖动。</p>
     <p id="nativeNote" class="hint hidden">当前是<b>内置驱动</b>：网关直接连云端，不需要任何外部 WebDAV 进程。
       换账号或在新设备上首次接入，把 PC 端配置里的三样东西贴下面即可；密钥填成同一个，云端已有密文就能直接解开。</p>
-    <div class="row"><button id="btnNativeToggle" class="ghost hidden">换账号 / 导入</button></div>
+    <div class="row"><button id="btnNativeToggle" class="ghost tap hidden">换账号 / 导入</button></div>
     <div id="nativeForm" class="hidden">
       <div class="grid">
         <label>云端授权串<textarea id="fAuth" rows="3" placeholder="粘贴 config.json 里的 cloud_authorization（base64 一长串）"></textarea></label>
@@ -35,7 +39,7 @@
         <label>分片大小<input id="fChunkN" placeholder="500Mi" value="500Mi" autocomplete="off"></label>
       </div>
       <div class="row">
-        <button id="btnSaveCloud" class="primary">保存并连接</button>
+        <button id="btnSaveCloud" class="primary tap">保存并连接</button>
         <span id="cloudMsg" class="muted"></span>
       </div>
     </div>
@@ -48,7 +52,7 @@
         <label>分片大小<input id="fChunk" placeholder="500Mi" value="500Mi" autocomplete="off"></label>
       </div>
       <div class="row">
-        <button id="btnSave" class="primary">保存并连接</button>
+        <button id="btnSave" class="primary tap">保存并连接</button>
         <span id="setupMsg" class="muted"></span>
       </div>
     </div>
@@ -57,21 +61,30 @@
   <section class="panel">
     <div id="drop" class="drop">
       <input id="fileInput" type="file" multiple hidden>
-      <p><strong>拖入文件</strong> 或 <a id="pickFile" href="#">选择文件</a></p>
-      <p class="hint">上传前在本机完成加密；云端只会看到乱码文件名与密文。</p>
+      <button id="pickFile" class="primary tap">＋ 上传文件</button>
+      <p class="hint drop-hint">可拖入文件；上传前在本机完成加密，云端只有乱码名与密文。</p>
       <div id="queue"></div>
     </div>
   </section>
 
-  <section class="panel">
-    <div class="row between">
+  <section class="panel library">
+    <div class="row between lib-head">
       <h2>媒体库 <span class="muted" id="count"></span></h2>
-      <div class="row">
-        <button id="btnUp" class="ghost" disabled>上一级</button>
-        <button id="btnRefresh" class="ghost">刷新</button>
+      <div class="row tools">
+        <select id="sortSel" class="tap" title="排序">
+          <option value="name">名称</option>
+          <option value="time">时间</option>
+          <option value="size">大小</option>
+        </select>
+        <div class="seg" role="group" aria-label="视图">
+          <button id="btnGrid" data-mode="grid" class="tap" title="网格">▦</button>
+          <button id="btnList" data-mode="list" class="tap" title="列表">☰</button>
+        </div>
+        <button id="btnUp" class="ghost tap" disabled>↑</button>
+        <button id="btnRefresh" class="ghost tap" title="刷新">⟳</button>
       </div>
     </div>
-    <div id="list" class="list"></div>
+    <div id="list" class="album"></div>
   </section>
 </main>
 
@@ -79,13 +92,17 @@
   <div class="viewer-bar">
     <span id="viewerTitle"></span>
     <div class="row">
-      <button id="btnJump" class="ghost">跳到 90%</button>
-      <button id="btnClose" class="ghost">关闭</button>
+      <button id="btnJump" class="ghost tap hidden">跳到 90%</button>
+      <button id="btnClose" class="ghost tap">关闭</button>
     </div>
   </div>
+  <button id="btnPrev" class="viewer-nav prev hidden" aria-label="上一张">‹</button>
+  <button id="btnNext" class="viewer-nav next hidden" aria-label="下一张">›</button>
   <div class="viewer-body" id="viewerBody"></div>
   <div class="viewer-foot muted" id="viewerFoot"></div>
 </div>
+
+<div id="toast" class="toast hidden"></div>
 
 <script src="/app.js"></script>
 </body>

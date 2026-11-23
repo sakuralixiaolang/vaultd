@@ -91,6 +91,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/list", s.guard(s.handleList))
 	mux.HandleFunc("/api/upload", s.guard(s.handleUpload))
 	mux.HandleFunc("/api/stream", s.guard(s.handleStream))
+	mux.HandleFunc("/api/thumb", s.guard(s.handleThumb))
 	mux.HandleFunc("/api/setup", s.guard(s.handleSetup))
 	mux.HandleFunc("/api/delete", s.guard(s.handleDelete))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })

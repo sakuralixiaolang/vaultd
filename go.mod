@@ -2,7 +2,10 @@ module vaultd
 
 go 1.26.0
 
-require github.com/rclone/rclone v1.76.0
+require (
+	github.com/rclone/rclone v1.76.0
+	golang.org/x/image v0.48.0
+)
 
 require (
 	github.com/Azure/go-ntlmssp v0.1.1 // indirect

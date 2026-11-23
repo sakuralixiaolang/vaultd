@@ -63,6 +63,19 @@ public class MainActivity extends Activity {
 
         setContentView(web);
 
+        // targetSdk 33+ 的系统默认走「预测性返回」回调，onBackPressed 根本不会被调用，
+        // 所以要显式注册 OnBackInvokedCallback；老系统仍走 onBackPressed。
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    new android.window.OnBackInvokedCallback() {
+                        @Override
+                        public void onBackInvoked() {
+                            handleBack();
+                        }
+                    });
+        }
+
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -126,13 +139,27 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
     }
 
-    @Override
-    public void onBackPressed() {
-        if (web != null && web.canGoBack()) {
-            web.goBack();
+    private void handleBack() {
+        // 页面内的层级（查看器、子目录）由前端接管；前端返回 false 表示已在根目录，再退出。
+        if (web == null) {
+            finish();
             return;
         }
-        super.onBackPressed();
+        web.evaluateJavascript(
+                "(window.vaultdBack && window.vaultdBack()) ? 'true' : 'false'",
+                new ValueCallback<String>() {
+                    @Override
+                    public void onReceiveValue(String value) {
+                        if (!(value != null && value.contains("true"))) {
+                            finish();
+                        }
+                    }
+                });
+    }
+
+    @Override
+    public void onBackPressed() {
+        handleBack();
     }
 
     @Override

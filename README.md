@@ -35,10 +35,11 @@ internal/localcfg/     本机配置 + 主密钥引导（首启生成、原子落
 internal/cloud139/     内置个人云客户端（路由/列表/直链/Range 读/分片上传/改名/删除）
 internal/dav/          进程内最小 WebDAV 服务，把云盘接口翻译成 rclone 认识的文件系统
 internal/vault/        chunker→crypt→webdav 三层组装，List/Upload/OpenRange
-internal/server/       Range 网关、上传、错误分类
-internal/webui/        内嵌前端（列表 / 相册 / 播放器）
+internal/server/       Range 网关、上传、错误分类、缩略图（/api/thumb，内存 LRU）
+internal/webui/        内嵌前端（网格相册 / 列表 / 查看器 / 上传队列）
 android/               单 Activity + WebView 壳、手工打包脚本（不依赖 Gradle）
 scripts/selftest.ps1   无需真实云盘的全链路自测
+scripts/ui-fixture.ps1 离线 UI 验收：本机 WebDAV 替身 + 模拟器指向宿主机
 scripts/build-aar.ps1  重建安卓 Go 绑定
 scripts/native_accept.ps1  内置驱动端到端验收（40 MB 上传 + 90% Range）
 docs/选型结论.md        阶段 0 的检索与选型依据
@@ -100,6 +101,7 @@ MVP 走本机 AList / OpenList 暴露的 WebDAV：
 | 干净机器开局 | 删掉本机配置目录后重新 build 并启动：自动生成新密钥、可连上、可列目录 |
 | 4 GB 拖到 90% | 播放器里点「跳到 90%」，页面会显示「起播耗时 xxx ms」；同时看网关日志只有小段 Range |
 | restart 保持 | 杀进程重启，密钥指纹不变、已上传文件仍可播 |
+| 手机端相册 | `scripts/ui-fixture.ps1` 后看：网格出真缩略图（3000×2000 大图缩放正常）、左右切图、双击放大、返回键先关查看器 |
 | 仓库干净 | `git status` 干净；`scripts/secret-scan.ps1` 不报凭据、私人路径、真实对象名与身份信息 |
 
 ## 自测（不需要真实云盘）
@@ -210,6 +212,19 @@ App 私有目录的 `config.json` 里放 `backend=native` + `cloud_provider=139`
 
 > 调试技巧：debug 包默认打开 WebView 调试，`adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>` 后可直接在 DevTools 里看页面与网关请求。
 > 若模拟器改过 `wm size`（override 尺寸与截图像素不一致），`adb shell input tap` 要用 override 坐标，否则点不中。
+
+### 手机端界面（2026-11-24 改版）
+
+前端仍然是同一份 `internal/webui/static/*`，PC 与安卓共用，改版重点是「像相册而不是文件列表」：
+
+- **网格相册**：方形瓦片、`object-fit: cover`、底部渐变名条；视频/音频/普通文件用角标区分格式，文件夹单独配色。视图可在「网格 / 列表」间切换，按名称/时间/大小排序，选择记在 `localStorage`。
+- **缩略图**：新增 `GET /api/thumb?path=&w=`。服务端按扩展名只接 `jpg/png/gif/webp/bmp`，整包读入（>24 MiB 直接拒绝，避免手机上爆内存），`x/image/draw` 的 Catmull-Rom 缩放到目标宽度后编成 JPEG(q82)，按 `路径+大小+修改时间+宽度` 做键，内存缓存上限 200 张 / 48 MiB；同一个键并发请求只解码一次。不支持的格式返回错误让前端退回占位图标。
+- **查看器**：左右箭头 + 单指横滑切图（放大状态下不切，避免和拖动冲突）、双击放大到 2 倍并按点中位置定位、放大后可拖动查看整张；视频保留 90% 跳转与起播探针。
+- **返回键**：`targetSdk 36` 下系统默认走预测性返回，`onBackPressed` 不会被调用，因此 Activity 显式注册 `OnBackInvokedCallback`，交给前端的 `window.vaultdBack()`：先关查看器，再退一层目录，到根目录才退出 App。
+- **上传**：队列成功后自动收起；失败按 `1s / 3s / 8s` 退避重试，重试耗尽后留一行错误并提供「重试」按钮；上传目标目录在上传开始时固定，中途翻目录不会传错地方。
+- **移动端细节**：`env(safe-area-inset-*)`、触控目标 ≥40px、删除按钮常显（手机没有 hover）、顶部/底部栏常驻，错误统一走底部 toast 而不是 `alert()` 打断操作。
+
+离线验证 UI（不依赖真实云盘与外网）：`scripts/ui-fixture.ps1` 用本机 `rclone serve webdav` 冒充云端，造 3000×2000 / 400×400 / 160×90 三个样本加密上传，再把设备配置指向 `http://10.0.2.2:5299`，即可在模拟器里检查网格、缩略图、切图与返回键。
 
 ## 已知边界
 

@@ -1,7 +1,16 @@
-// 前端只需三件事：列目录、流式上传、把播放器的 Range 请求打回本地网关。
+// 前端只做三件事：列目录（缩略图网格 / 列表）、流式上传、把播放器的 Range 请求打回本地网关。
 // 所有解密都发生在网关里，浏览器永远拿不到密钥。
 
-const state = { cwd: "", entries: [], configured: false, vaultReady: null, nativeFormOpen: false };
+const state = {
+  cwd: "",
+  entries: [],
+  configured: false,
+  vaultReady: null,
+  nativeFormOpen: false,
+  view: localStorage.getItem("vaultd.view") || "grid",
+  sort: localStorage.getItem("vaultd.sort") || "name",
+  viewer: { items: [], index: -1, zoom: false },
+};
 const $ = (id) => document.getElementById(id);
 
 const fmtSize = (n) => {
@@ -11,8 +20,23 @@ const fmtSize = (n) => {
   do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
   return n.toFixed(n >= 10 ? 0 : 1) + " " + u[i];
 };
-
+const fmtDate = (s) => {
+  if (!s) return "";
+  const d = new Date(s);
+  if (isNaN(d)) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
 const joinPath = (dir, name) => "/" + [dir.replace(/\/+$/, ""), name].filter(Boolean).join("/").replace(/^\/+/, "");
+
+let toastTimer = 0;
+function toast(msg, kind = "err") {
+  const el = $("toast");
+  el.textContent = msg;
+  el.className = "toast " + kind;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.add("hidden"), 2600);
+}
 
 async function api(url, opts) {
   const r = await fetch(url, opts);
@@ -58,11 +82,11 @@ async function loadStatus() {
 async function loadList() {
   const r = await api("/api/list?path=" + encodeURIComponent(state.cwd));
   state.entries = r.entries || [];
-  $("pathbar").textContent = r.path || "/";
+  showPath(r.path || "/");
   $("btnUp").disabled = state.cwd === "";
   const dirs = state.entries.filter((e) => e.dir).length;
   const files = state.entries.length - dirs;
-  $("count").textContent = dirs || files ? `（${dirs} 个目录 / ${files} 个文件）` : "";
+  $("count").textContent = state.entries.length ? `${dirs} 目录 · ${files} 文件` : "";
   renderList();
   // 列表既然拉到了，说明后台自己连上了；把状态与错误面板同步过来，
   // 否则手机开机网络晚到时会一直挂着「连接失败」的提示。
@@ -72,65 +96,180 @@ async function loadList() {
   }
 }
 
+function showPath(p) {
+  $("pathbar").textContent = p === "/" ? "根目录 /" : p;
+  $("pathbar").title = p;
+}
+
+function sortedEntries() {
+  const list = [...state.entries];
+  list.sort((a, b) => {
+    if (!!b.dir !== !!a.dir) return b.dir ? 1 : -1;
+    if (state.sort === "size") return (b.size || 0) - (a.size || 0);
+    if (state.sort === "time") {
+      const ta = Date.parse(a.mod_time || "") || 0;
+      const tb = Date.parse(b.mod_time || "") || 0;
+      if (tb !== ta) return tb - ta;
+    }
+    return a.name.localeCompare(b.name, "zh");
+  });
+  return list;
+}
+
 function renderList() {
   const box = $("list");
+  box.className = "album" + (state.view === "list" ? " list-mode" : "");
   box.innerHTML = "";
+  $("btnGrid").classList.toggle("on", state.view === "grid");
+  $("btnList").classList.toggle("on", state.view === "list");
+
   if (!state.entries.length) {
-    box.innerHTML = '<div class="empty">这里还是空的，先传一个视频试试。</div>';
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.innerHTML = `<div class="big">🗂️</div><p>这里是空的</p>
+      <button class="primary tap" id="btnEmptyUp">上传文件</button>`;
+    empty.style.gridColumn = "1 / -1";
+    box.appendChild(empty);
+    $("btnEmptyUp").addEventListener("click", () => $("fileInput").click());
     return;
   }
-  const sorted = [...state.entries].sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name, "zh"));
-  for (const e of sorted) {
-    const row = document.createElement("div");
-    row.className = "item";
-    const icon = e.dir ? "📁" : mediaIcon(e.name);
-    row.innerHTML = `<div class="icon">${icon}</div>
-      <div class="name" title="${escapeHtml(e.name)}">${escapeHtml(e.name)}</div>
-      <div class="size">${e.dir ? "" : fmtSize(e.size)}</div>
-      <button class="del ghost" title="删除">✕</button>`;
-    row.addEventListener("click", () => {
-      if (e.dir) openDir(e.name);
-      else openViewer(e);
-    });
-    row.querySelector(".del").addEventListener("click", async (ev) => {
-      ev.stopPropagation();
-      if (!confirm("删除 " + e.name + " ？")) return;
-      try {
-        await api("/api/delete?path=" + encodeURIComponent(e.path), { method: "POST" });
-        await loadList();
-      } catch (err) { alert("删除失败：" + err.message); }
-    });
-    box.appendChild(row);
+  for (const e of sortedEntries()) {
+    box.appendChild(state.view === "grid" ? tileEl(e) : rowEl(e));
   }
 }
 
-const mediaIcon = (name) => {
-  const ext = (name.split(".").pop() || "").toLowerCase();
-  if (["mp4", "m4v", "mkv", "mov", "webm", "avi"].includes(ext)) return "🎬";
-  if (["jpg", "jpeg", "png", "gif", "webp", "heic", "bmp"].includes(ext)) return "🖼️";
-  if (["mp3", "flac", "m4a", "wav", "aac"].includes(ext)) return "🎧";
-  return "📄";
-};
-const isVideo = (name) => /\.(mp4|m4v|mkv|mov|webm|avi)$/i.test(name);
-const isImage = (name) => /\.(jpg|jpeg|png|gif|webp|heic|bmp)$/i.test(name);
+const EXT_IMG = ["jpg", "jpeg", "png", "gif", "webp", "bmp"];
+const extOf = (n) => (n.split(".").pop() || "").toLowerCase();
+const isImage = (n) => EXT_IMG.includes(extOf(n));
+const isVideo = (n) => ["mp4", "m4v", "mkv", "mov", "webm", "avi"].includes(extOf(n));
+const isAudio = (n) => ["mp3", "flac", "m4a", "wav", "aac", "ogg"].includes(extOf(n));
+const thumbURL = (e, w) => "/api/thumb?w=" + w + "&path=" + encodeURIComponent(e.path);
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+function fallbackGlyph(name) {
+  if (isImage(name)) return "🖼️";
+  if (isVideo(name)) return "🎬";
+  if (isAudio(name)) return "🎧";
+  return "📄";
+}
+
+function tileEl(e) {
+  const el = document.createElement("div");
+  el.className = "tile";
+  let ph = "";
+  let badge = "";
+  if (e.dir) {
+    ph = `<div class="tile-ph dir"><span class="glyph">📁</span></div>`;
+  } else if (isImage(e.name)) {
+    ph = `<div class="tile-ph"><span class="glyph">${fallbackGlyph(e.name)}</span></div>`;
+  } else if (isVideo(e.name)) {
+    ph = `<div class="tile-ph video"><span class="glyph">▶</span></div>`;
+    badge = `<span class="tile-badge">${escapeHtml(extOf(e.name).toUpperCase())}</span>`;
+  } else if (isAudio(e.name)) {
+    ph = `<div class="tile-ph audio"><span class="glyph">🎧</span></div>`;
+    badge = `<span class="tile-badge">${escapeHtml(extOf(e.name).toUpperCase())}</span>`;
+  } else {
+    ph = `<div class="tile-ph file"><span class="glyph">📄</span></div>`;
+    badge = `<span class="tile-badge">${escapeHtml(extOf(e.name).toUpperCase() || "FILE")}</span>`;
+  }
+  el.innerHTML = `${ph}${badge}
+    <button class="kill" title="删除">✕</button>
+    <div class="tile-meta"><div class="tile-name">${escapeHtml(e.name)}</div>
+    <div class="tile-size">${e.dir ? "文件夹" : fmtSize(e.size)}</div></div>`;
+  if (isImage(e.name)) {
+    // 缩略图按需解码：先挂 emoji 占位，加载成功再换成正图，失败就保持占位。
+    // 注意不能给游离节点设 loading="lazy"，那样浏览器不会发起请求。
+    const img = new Image();
+    img.decoding = "async";
+    img.onload = () => {
+      const holder = el.querySelector(".tile-ph");
+      holder.classList.add("filled");
+      holder.innerHTML = "";
+      holder.appendChild(img);
+    };
+    img.onerror = () => {};
+    img.src = thumbURL(e, 400);
+  }
+  el.addEventListener("click", (ev) => {
+    if (ev.target.classList.contains("kill")) return;
+    e.dir ? openDir(e.name) : openViewer(e);
+  });
+  el.querySelector(".kill").addEventListener("click", (ev) => { ev.stopPropagation(); removeEntry(e); });
+  return el;
+}
+
+function rowEl(e) {
+  const el = document.createElement("div");
+  el.className = "item";
+  let thumb = `<span>${e.dir ? "📁" : fallbackGlyph(e.name)}</span>`;
+  if (!e.dir && isImage(e.name)) {
+    thumb = `<img loading="lazy" decoding="async" src="${thumbURL(e, 120)}" alt="">`;
+  }
+  el.innerHTML = `<div class="thumb">${thumb}</div>
+    <div class="txt"><div class="name">${escapeHtml(e.name)}</div>
+    <div class="sub">${e.dir ? "文件夹" : fmtSize(e.size) + (e.mod_time ? " · " + fmtDate(e.mod_time) : "")}</div></div>
+    <button class="del ghost" title="删除">✕</button>`;
+  const img = el.querySelector(".thumb img");
+  if (img) img.addEventListener("error", () => { el.querySelector(".thumb").textContent = fallbackGlyph(e.name); });
+  el.addEventListener("click", (ev) => {
+    if (ev.target.classList.contains("del")) return;
+    e.dir ? openDir(e.name) : openViewer(e);
+  });
+  el.querySelector(".del").addEventListener("click", (ev) => { ev.stopPropagation(); removeEntry(e); });
+  return el;
+}
+
+async function removeEntry(e) {
+  if (!confirm("删除 " + e.name + " ？")) return;
+  try {
+    await api("/api/delete?path=" + encodeURIComponent(e.path), { method: "POST" });
+    toast("已删除 " + e.name, "ok");
+    if (state.viewer.index >= 0) closeViewer();
+    await loadList();
+  } catch (err) {
+    toast("删除失败：" + err.message);
+  }
+}
+
 function openDir(name) {
   state.cwd = joinPath(state.cwd, name).replace(/^\//, "");
-  loadList();
+  loadList().catch((err) => toast("打开目录失败：" + err.message));
+}
+
+// ---------- 查看器：左右切图 / 双击缩放 / Range 播放 ----------
+
+function viewerItems() {
+  return sortedEntries().filter((e) => !e.dir && (isImage(e.name) || isVideo(e.name)));
 }
 
 async function openViewer(e) {
-  const src = "/api/stream?path=" + encodeURIComponent(e.path);
+  const items = viewerItems();
+  const index = items.findIndex((it) => it.path === e.path);
+  state.viewer = { items, index: index >= 0 ? index : 0, zoom: false };
   $("viewer").classList.remove("hidden");
-  $("viewerTitle").textContent = e.name;
-  $("viewerFoot").textContent = fmtSize(e.size);
+  renderViewer();
+}
+
+function renderViewer() {
+  const { items, index } = state.viewer;
+  const e = items[index];
+  if (!e) return closeViewer();
   const body = $("viewerBody");
   body.innerHTML = "";
+  body.classList.remove("zoomed");
+  body.scrollTop = 0;
+  body.scrollLeft = 0;
+  state.viewer.zoom = false;
+  $("viewerTitle").textContent = (index + 1) + "/" + items.length + "  " + e.name;
+  $("viewerFoot").textContent = fmtSize(e.size) + (e.mod_time ? " · " + fmtDate(e.mod_time) : "");
   $("btnJump").classList.toggle("hidden", !isVideo(e.name));
+  $("btnPrev").classList.toggle("hidden", items.length < 2);
+  $("btnNext").classList.toggle("hidden", items.length < 2);
+  $("btnPrev").disabled = index <= 0;
+  $("btnNext").disabled = index >= items.length - 1;
 
   if (isVideo(e.name)) {
     const v = document.createElement("video");
@@ -138,24 +277,90 @@ async function openViewer(e) {
     v.preload = "metadata";
     v.autoplay = true;
     v.playsInline = true;
-    v.src = src;
+    v.src = "/api/stream?path=" + encodeURIComponent(e.path);
     body.appendChild(v);
     attachSeekProbe(v);
   } else if (isImage(e.name)) {
     const img = document.createElement("img");
-    img.src = src;
+    img.src = "/api/stream?path=" + encodeURIComponent(e.path);
+    img.alt = e.name;
     body.appendChild(img);
+    attachImageGestures(body, img);
   } else {
     const a = document.createElement("a");
-    a.href = src;
+    a.href = "/api/stream?path=" + encodeURIComponent(e.path);
     a.textContent = "下载 / 打开";
     a.style.color = "var(--accent)";
     body.appendChild(a);
   }
 }
 
-// 播放器一旦拖到 90%，用 seeked→playing 的间隔量化“起播耗时”，
-// 并把浏览器实际发出的请求交给用户核对（网关侧只回 206 + 小段 Content-Range）。
+function step(delta) {
+  const { items, index } = state.viewer;
+  const next = index + delta;
+  if (next < 0 || next >= items.length) return;
+  state.viewer.index = next;
+  renderViewer();
+}
+
+function attachImageGestures(body, img) {
+  // 双击切换放大：按点中的位置定位，放大后整页可拖动查看
+  img.addEventListener("dblclick", (ev) => {
+    ev.preventDefault();
+    if (state.viewer.zoom) {
+      resetZoom(body, img);
+      return;
+    }
+    const r = img.getBoundingClientRect();
+    const rx = r.width ? (ev.clientX - r.left) / r.width : 0.5;
+    const ry = r.height ? (ev.clientY - r.top) / r.height : 0.5;
+    const vw = body.clientWidth;
+    body.classList.add("zoomed");
+    img.classList.add("zoom");
+    img.style.width = vw * 2 + "px";
+    state.viewer.zoom = true;
+    $("btnPrev").classList.add("hidden");
+    $("btnNext").classList.add("hidden");
+    requestAnimationFrame(() => {
+      body.scrollLeft = rx * vw * 2 - vw / 2;
+      body.scrollTop = ry * img.clientHeight - body.clientHeight / 2;
+    });
+  });
+  gesture.img = img;
+}
+
+function resetZoom(body, img) {
+  img.classList.remove("zoom");
+  img.style.width = "";
+  body.classList.remove("zoomed");
+  body.scrollLeft = 0;
+  body.scrollTop = 0;
+  state.viewer.zoom = false;
+  const n = state.viewer.items.length;
+  $("btnPrev").classList.toggle("hidden", n < 2);
+  $("btnNext").classList.toggle("hidden", n < 2);
+}
+
+// 单指横滑切图：监听器只在模块里挂一次，viewerBody 每次渲染都是同一个节点
+const gesture = { img: null, sx: 0, sy: 0, moved: false };
+$("viewerBody").addEventListener("pointerdown", (ev) => {
+  if (!gesture.img) return;
+  gesture.sx = ev.clientX;
+  gesture.sy = ev.clientY;
+  gesture.moved = false;
+});
+$("viewerBody").addEventListener("pointermove", (ev) => {
+  if (!gesture.img) return;
+  if (Math.abs(ev.clientX - gesture.sx) > 12) gesture.moved = true;
+});
+$("viewerBody").addEventListener("pointerup", (ev) => {
+  if (!gesture.img || !gesture.moved || state.viewer.zoom) return;
+  const dx = ev.clientX - gesture.sx;
+  const dy = ev.clientY - gesture.sy;
+  if (Math.abs(dx) > 60 && Math.abs(dy) < 70) step(dx < 0 ? 1 : -1);
+});
+
+// 播放器一旦拖到 90%，用 seeked→playing 的间隔量化“起播耗时”
 let probeStart = 0;
 function attachSeekProbe(v) {
   v.addEventListener("seeked", () => {
@@ -170,24 +375,57 @@ function attachSeekProbe(v) {
   });
 }
 
+function closeViewer() {
+  $("viewer").classList.add("hidden");
+  $("viewerBody").innerHTML = "";
+  $("viewerBody").classList.remove("zoomed");
+  gesture.img = null;
+  state.viewer = { items: [], index: -1, zoom: false };
+  probeStart = 0;
+}
+
 $("btnJump").addEventListener("click", () => {
   const v = document.querySelector("#viewerBody video");
   if (!v || !v.duration) return;
   v.currentTime = v.duration * 0.9;
 });
-
-$("btnClose").addEventListener("click", () => {
-  $("viewer").classList.add("hidden");
-  $("viewerBody").innerHTML = "";
-  probeStart = 0;
+$("btnClose").addEventListener("click", closeViewer);
+$("btnPrev").addEventListener("click", () => step(-1));
+$("btnNext").addEventListener("click", () => step(1));
+document.addEventListener("keydown", (ev) => {
+  if ($("viewer").classList.contains("hidden")) return;
+  if (ev.key === "ArrowLeft") step(-1);
+  if (ev.key === "ArrowRight") step(1);
+  if (ev.key === "Escape") closeViewer();
 });
 
-$("btnRefresh").addEventListener("click", () => loadList().catch((e) => alert(e.message)));
+// ---------- 顶部/视图控件 ----------
+
+$("btnRefresh").addEventListener("click", () => loadList().catch((err) => toast("刷新失败：" + err.message)));
 $("btnUp").addEventListener("click", () => {
   state.cwd = state.cwd.split("/").slice(0, -1).join("/");
-  loadList();
+  loadList().catch((err) => toast("返回失败：" + err.message));
+});
+$("pathbar").addEventListener("click", () => {
+  if (!state.cwd) return;
+  state.cwd = "";
+  loadList().catch((err) => toast("返回失败：" + err.message));
 });
 $("btnSetup").addEventListener("click", () => $("setupPanel").classList.toggle("hidden"));
+
+$("btnGrid").addEventListener("click", () => setView("grid"));
+$("btnList").addEventListener("click", () => setView("list"));
+function setView(v) {
+  state.view = v;
+  localStorage.setItem("vaultd.view", v);
+  renderList();
+}
+$("sortSel").value = state.sort;
+$("sortSel").addEventListener("change", (ev) => {
+  state.sort = ev.target.value;
+  localStorage.setItem("vaultd.sort", state.sort);
+  renderList();
+});
 
 $("btnNativeToggle").addEventListener("click", () => {
   state.nativeFormOpen = !state.nativeFormOpen;
@@ -216,9 +454,11 @@ $("btnSaveCloud").addEventListener("click", async () => {
     state.nativeFormOpen = false;
     await loadStatus();
     await loadList();
+    toast("已连接云端", "ok");
     $("keyfp").textContent = r && r.fingerprint ? "密钥 " + r.fingerprint + "…" : $("keyfp").textContent;
   } catch (err) {
     $("cloudMsg").textContent = "失败：" + err.message;
+    toast("接入失败：" + err.message);
   }
 });
 
@@ -240,23 +480,25 @@ $("btnSave").addEventListener("click", async () => {
     $("setupMsg").textContent = "";
     await loadStatus();
     await loadList();
+    toast("已连接 WebDAV", "ok");
   } catch (err) {
     $("setupMsg").textContent = "失败：" + err.message;
+    toast("接入失败：" + err.message);
   }
 });
 
-// ---------- 上传：流式 + 进度 + 失败分类重试 ----------
+// ---------- 上传：流式 + 进度 + 自动重试 + 手动重试 ----------
 
 const RETRY_DELAYS = [1000, 3000, 8000];
 
-function uploadOne(file, attempt = 0, onProgress) {
+function uploadOne(file, dir, attempt, onProgress) {
   return new Promise((resolve, reject) => {
-    const target = joinPath(state.cwd, file.name).replace(/^\//, "");
+    const target = joinPath(dir, file.name).replace(/^\//, "");
     const xhr = new XMLHttpRequest();
     xhr.open("PUT", "/api/upload?path=" + encodeURIComponent(target));
     xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) onProgress(ev.loaded / ev.total); };
     xhr.onload = () => {
-      if (xhr.status >= 200 && xhr.status < 300) return resolve(JSON.parse(xhr.responseText));
+      if (xhr.status >= 200 && xhr.status < 300) return resolve(JSON.parse(xhr.responseText || "{}"));
       const err = new Error("HTTP " + xhr.status);
       try {
         const body = JSON.parse(xhr.responseText);
@@ -273,25 +515,35 @@ function uploadOne(file, attempt = 0, onProgress) {
   });
 }
 
-function queueItem(file) {
+function queueItem(file, dir) {
   const el = document.createElement("div");
   el.className = "queue-item";
-  el.innerHTML = `<div class="meta"><span>${escapeHtml(file.name)} · ${fmtSize(file.size)}</span><span class="st">等待</span></div>
+  el.innerHTML = `<div class="meta"><span class="nm">${escapeHtml(file.name)} · ${fmtSize(file.size)}</span>
+    <span class="st">等待</span><button class="retry ghost hidden">重试</button></div>
     <div class="bar"><i></i></div>`;
   $("queue").appendChild(el);
   const bar = el.querySelector(".bar");
   const fill = el.querySelector("i");
   const st = el.querySelector(".st");
+  const retryBtn = el.querySelector(".retry");
 
   const run = async (attempt) => {
+    retryBtn.classList.add("hidden");
+    bar.classList.remove("err", "warn");
     st.textContent = attempt ? `重试 ${attempt}/${RETRY_DELAYS.length}` : "上传中";
     try {
-      await uploadOne(file, attempt, (p) => {
+      await uploadOne(file, dir, attempt, (p) => {
         fill.style.width = (p * 100).toFixed(1) + "%";
         st.textContent = (p * 100).toFixed(0) + "%";
       });
       fill.style.width = "100%";
       st.textContent = "完成";
+      bar.style.opacity = ".5";
+      // 成功后自动收起，避免队列越积越长；失败项保留以便手动重试
+      setTimeout(() => {
+        el.classList.add("done");
+        setTimeout(() => el.remove(), 500);
+      }, 2200);
     } catch (err) {
       if (err.retryable && attempt < RETRY_DELAYS.length) {
         bar.classList.add("warn");
@@ -300,23 +552,50 @@ function queueItem(file) {
         return;
       }
       bar.classList.add("err");
+      fill.style.width = "100%";
       st.textContent = (err.code || "失败") + "：" + err.message;
+      retryBtn.classList.remove("hidden");
+      toast("上传失败：" + file.name + " · " + err.message);
     }
   };
+  retryBtn.addEventListener("click", () => { fill.style.width = "0"; run(0); });
   return run(0);
 }
 
 async function uploadFiles(files) {
-  for (const f of files) await queueItem(f);
+  if (!files.length) return;
+  const dir = state.cwd; // 上传过程中翻目录也不会传错地方
+  for (const f of files) await queueItem(f, dir);
   await loadList();
 }
 
 $("pickFile").addEventListener("click", (ev) => { ev.preventDefault(); $("fileInput").click(); });
-$("fileInput").addEventListener("change", (ev) => uploadFiles([...ev.target.files]));
+$("fileInput").addEventListener("change", (ev) => {
+  uploadFiles([...ev.target.files]).catch((e) => toast("上传出错：" + e.message));
+  ev.target.value = "";
+});
 const drop = $("drop");
 ["dragenter", "dragover"].forEach((n) => drop.addEventListener(n, (ev) => { ev.preventDefault(); drop.classList.add("hot"); }));
 ["dragleave", "drop"].forEach((n) => drop.addEventListener(n, (ev) => { ev.preventDefault(); drop.classList.remove("hot"); }));
-drop.addEventListener("drop", (ev) => uploadFiles([...ev.dataTransfer.files]));
+drop.addEventListener("drop", (ev) => uploadFiles([...ev.dataTransfer.files]).catch((e) => toast("上传出错：" + e.message)));
+
+window.addEventListener("scroll", () => {
+  document.querySelector("header").classList.toggle("stuck", window.scrollY > 4);
+}, { passive: true });
+
+// 安卓返回键：先关查看器，再退一层目录，都没有才让 App 退出
+window.vaultdBack = () => {
+  if (!$("viewer").classList.contains("hidden")) {
+    closeViewer();
+    return true;
+  }
+  if (state.cwd) {
+    state.cwd = state.cwd.split("/").slice(0, -1).join("/");
+    loadList().catch((err) => toast("返回失败：" + err.message));
+    return true;
+  }
+  return false;
+};
 
 (async function boot() {
   try {
