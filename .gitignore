@@ -1,0 +1,28 @@
+# 构建产物
+bin/
+*.exe
+*.dll
+*.pdb
+
+# 本机配置与凭据：一律不入库、不进 Release
+config.json
+key.json
+*.local.json
+*.local.yaml
+rclone.conf
+.env
+.env.*
+*.token
+*.pem
+credentials*.json
+
+# 本地运行数据
+local/
+.tools/
+*.log
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

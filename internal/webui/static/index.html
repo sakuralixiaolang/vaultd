@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>密文相册</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="dot" id="health"></span>
+    <strong>密文相册</strong>
+    <span class="muted" id="keyfp"></span>
+  </div>
+  <nav>
+    <span class="muted" id="pathbar">/</span>
+    <button id="btnSetup" class="ghost">接入设置</button>
+  </nav>
+</header>
+
+<main>
+  <section id="setupPanel" class="panel hidden">
+    <h2>云端接入（本机 AList / OpenList 的 WebDAV）</h2>
+    <p class="hint">目标存储必须开启「Web 代理 / WebDAV 本地代理」，否则 Range 不成立，视频无法拖动。</p>
+    <div class="grid">
+      <label>WebDAV 地址<input id="fUrl" placeholder="http://127.0.0.1:5244/dav" autocomplete="off"></label>
+      <label>用户名<input id="fUser" placeholder="openlist 账号" autocomplete="off"></label>
+      <label>密码<input id="fPass" type="password" placeholder="openlist 密码" autocomplete="off"></label>
+      <label>密文根目录<input id="fRemote" placeholder="vault" value="vault" autocomplete="off"></label>
+      <label>分片大小<input id="fChunk" placeholder="500Mi" value="500Mi" autocomplete="off"></label>
+    </div>
+    <div class="row">
+      <button id="btnSave" class="primary">保存并连接</button>
+      <span id="setupMsg" class="muted"></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div id="drop" class="drop">
+      <input id="fileInput" type="file" multiple hidden>
+      <p><strong>拖入文件</strong> 或 <a id="pickFile" href="#">选择文件</a></p>
+      <p class="hint">上传前在本机完成加密；云端只会看到乱码文件名与密文。</p>
+      <div id="queue"></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="row between">
+      <h2>媒体库 <span class="muted" id="count"></span></h2>
+      <div class="row">
+        <button id="btnUp" class="ghost" disabled>上一级</button>
+        <button id="btnRefresh" class="ghost">刷新</button>
+      </div>
+    </div>
+    <div id="list" class="list"></div>
+  </section>
+</main>
+
+<div id="viewer" class="viewer hidden">
+  <div class="viewer-bar">
+    <span id="viewerTitle"></span>
+    <div class="row">
+      <button id="btnJump" class="ghost">跳到 90%</button>
+      <button id="btnClose" class="ghost">关闭</button>
+    </div>
+  </div>
+  <div class="viewer-body" id="viewerBody"></div>
+  <div class="viewer-foot muted" id="viewerFoot"></div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
