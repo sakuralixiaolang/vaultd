@@ -11,11 +11,12 @@ $platJ = Join-Path $sdk 'platforms\android-36\android.jar'
 $jdk   = "$env:PROGRAMFILES\Android\Android Studio\jbr"
 $aar   = Join-Path $Repo 'android\app\libs\vaultd.aar'
 $man   = Join-Path $Repo 'android\app\src\main\AndroidManifest.xml'
-$src   = Join-Path $Repo 'android\app\src\main\java\com\vaultd\app\MainActivity.java'
+$javaRoot = Join-Path $Repo 'android\app\src\main\java'
+$srcs  = @(Get-ChildItem $javaRoot -Recurse -Filter *.java | ForEach-Object { $_.FullName })
 $build = Join-Path $Repo 'android\build'
 $out   = $OutDir
 
-foreach ($p in @($bt, $platJ, $jdk, $aar, $man, $src)) {
+foreach ($p in @($bt, $platJ, $jdk, $aar, $man, $javaRoot)) {
   if (-not (Test-Path $p)) { throw "缺少依赖: $p" }
 }
 New-Item -ItemType Directory -Force -Path $build, $out | Out-Null
@@ -45,7 +46,7 @@ $objDir = Join-Path $build 'obj'
 if (Test-Path $objDir) { Remove-Item $objDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $objDir | Out-Null
 & "$jdk\bin\javac.exe" -encoding UTF-8 -source 11 -target 11 -nowarn -Xlint:-options `
-   -classpath "$platJ;$aarClasses" -d $objDir $src
+   -classpath "$platJ;$aarClasses" -d $objDir @srcs
 if ($LASTEXITCODE -ne 0) { throw "javac 失败" }
 "javac OK"
 
@@ -96,3 +97,4 @@ if (Test-Path $final) { Remove-Item $final -Force }
 if ($LASTEXITCODE -ne 0) { throw "apksigner 失败" }
 & "$bt\apksigner.bat" verify --print-certs $final | Select-Object -First 4
 "APK: $final  {0:N1} MB" -f ((Get-Item $final).Length / 1MB)
+

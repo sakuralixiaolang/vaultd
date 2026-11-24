@@ -12,6 +12,8 @@ const state = {
   view: localStorage.getItem("vaultd.view") || "grid",
   sort: localStorage.getItem("vaultd.sort") || "name",
   filter: localStorage.getItem("vaultd.filter") || "all",
+  cache: {}, // path -> {at, entries, path}：来回翻目录不用重新请求
+  renderKey: "",
   viewer: { items: [], index: -1, zoom: false },
 };
 const $ = (id) => document.getElementById(id);
@@ -47,6 +49,33 @@ const fmtDate = (s) => {
   const p = (n) => String(n).padStart(2, "0");
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 };
+// 网格里只放得下「日期」，时间留给列表/详情
+const fmtDay = (s) => {
+  if (!s) return "";
+  const d = new Date(s);
+  if (isNaN(d)) return "";
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+
+// 懒执行：元素滚到视口附近才真正去请求缩略图/抽帧。
+// 一屏 100 个文件时，这一步能把首屏的图片请求从 100 个压到 10 来个。
+let nearObserver = null;
+function whenNear(el, fn) {
+  if (!el) return;
+  if (!("IntersectionObserver" in window)) { fn(); return; }
+  if (!nearObserver) {
+    nearObserver = new IntersectionObserver((ents) => {
+      for (const en of ents) {
+        if (!en.isIntersecting) continue;
+        nearObserver.unobserve(en.target);
+        const cb = en.target.__near;
+        if (cb) { delete en.target.__near; cb(); }
+      }
+    }, { rootMargin: "600px 0px 600px 0px" });
+  }
+  el.__near = fn;
+  nearObserver.observe(el);
+}
 const joinPath = (dir, name) => "/" + [dir.replace(/\/+$/, ""), name].filter(Boolean).join("/").replace(/^\/+/, "");
 
 let toastTimer = 0;
@@ -110,14 +139,24 @@ function applyStatus(s) {
   }
 }
 
-async function loadList() {
+async function loadList(opts) {
+  const force = !!(opts && opts.force);
+  const cached = state.cache[state.cwd];
+  if (!force && cached && Date.now() - cached.at < 8000) {
+    state.entries = cached.entries;
+    showPath(cached.path);
+    $("btnUp").disabled = state.cwd === "";
+    paintCount();
+    refreshTargetOptions();
+    renderList();
+    return;
+  }
   const r = await api("/api/list?path=" + encodeURIComponent(state.cwd));
   state.entries = r.entries || [];
+  state.cache[state.cwd] = { at: Date.now(), entries: state.entries, path: r.path || "/" };
   showPath(r.path || "/");
   $("btnUp").disabled = state.cwd === "";
-  const dirs = state.entries.filter((e) => e.dir).length;
-  const files = state.entries.length - dirs;
-  $("count").textContent = state.entries.length ? `${dirs} 目录 · ${files} 文件` : "";
+  paintCount();
   refreshTargetOptions();
   renderList();
   // 列表既然拉到了，说明后台自己连上了；把状态与错误面板同步过来，
@@ -126,6 +165,12 @@ async function loadList() {
     state.vaultReady = true;
     loadStatus().catch(() => {});
   }
+}
+
+function paintCount() {
+  const dirs = state.entries.filter((e) => e.dir).length;
+  const files = state.entries.length - dirs;
+  $("count").textContent = state.entries.length ? `${dirs} 目录 · ${files} 文件` : "";
 }
 
 function showPath(p) {
@@ -175,7 +220,20 @@ function sortedEntries() {
   return list;
 }
 
-function renderList() {
+function renderKey() {
+  return [
+    state.cwd, state.view, state.sort, state.filter,
+    state.entries.length,
+    state.entries.map((e) => e.path + "|" + e.size + "|" + (e.mod_time || "")).join("\n"),
+  ].join("#");
+}
+
+function renderList(force) {
+  const key = renderKey();
+  if (!force && key === state.renderKey && $("list").childElementCount) {
+    return; // 内容没变就别重建 DOM：滚动位置、已解码的缩略图都能保住
+  }
+  state.renderKey = key;
   const box = $("list");
   box.className = "album" + (state.view === "list" ? " list-mode" : "");
   box.innerHTML = "";
@@ -197,9 +255,11 @@ function renderList() {
     $("btnEmptyUp").addEventListener("click", () => $("fileInput").click());
     return;
   }
+  const frag = document.createDocumentFragment();
   for (const e of shown) {
-    box.appendChild(state.view === "grid" ? tileEl(e) : rowEl(e));
+    frag.appendChild(state.view === "grid" ? tileEl(e) : rowEl(e));
   }
+  box.appendChild(frag);
 }
 
 function renderFilters() {
@@ -358,22 +418,22 @@ function tileEl(e) {
   el.innerHTML = `${ph}${badge}
     <button class="kill" title="删除">✕</button>
     <div class="tile-meta"><div class="tile-name">${escapeHtml(e.name)}</div>
-    <div class="tile-size">${e.dir ? "文件夹" : fmtSize(e.size)}</div></div>`;
+    <div class="tile-size">${e.dir ? "文件夹" : fmtSize(e.size) + (e.mod_time ? " · " + fmtDay(e.mod_time) : "")}</div></div>`;
   if (isImage(e.name)) {
-    // 缩略图按需解码：先挂 emoji 占位，加载成功再换成正图，失败就保持占位。
-    // 注意不能给游离节点设 loading="lazy"，那样浏览器不会发起请求。
+    // 缩略图等滚到附近再请求：一屏几十个格子同时解码会把手机卡住。
     const img = new Image();
     img.decoding = "async";
     img.onload = () => {
       const holder = el.querySelector(".tile-ph");
+      if (!holder) return;
       holder.classList.add("filled");
-      holder.innerHTML = "";
+      holder.textContent = "";
       holder.appendChild(img);
     };
     img.onerror = () => {};
-    img.src = thumbURL(e, 400);
+    whenNear(el, () => { img.src = thumbURL(e, 400); });
   } else if (isVideo(e.name)) {
-    attachVideoThumb(el.querySelector(".tile-ph"), e, "tile-vid");
+    whenNear(el, () => attachVideoThumb(el.querySelector(".tile-ph"), e, "tile-vid"));
   }
   el.addEventListener("click", (ev) => {
     if (ev.target.classList.contains("kill")) return;
@@ -396,7 +456,7 @@ function rowEl(e) {
     <button class="del ghost" title="删除">✕</button>`;
   const img = el.querySelector(".thumb img");
   if (img) img.addEventListener("error", () => { el.querySelector(".thumb").textContent = fallbackGlyph(e.name); });
-  if (!e.dir && isVideo(e.name)) attachVideoThumb(el.querySelector(".thumb"), e, "row-vid");
+  if (!e.dir && isVideo(e.name)) whenNear(el, () => attachVideoThumb(el.querySelector(".thumb"), e, "row-vid"));
   el.addEventListener("click", (ev) => {
     if (ev.target.classList.contains("del")) return;
     e.dir ? openDir(e.name) : openViewer(e);
@@ -411,7 +471,7 @@ async function removeEntry(e) {
     await api("/api/delete?path=" + encodeURIComponent(e.path), { method: "POST" });
     toast("已删除 " + e.name, "ok");
     if (state.viewer.index >= 0) closeViewer();
-    await loadList();
+    await loadList({ force: true });
   } catch (err) {
     toast("删除失败：" + err.message);
   }
@@ -627,7 +687,7 @@ document.addEventListener("keydown", (ev) => {
 
 // ---------- 顶部/视图控件 ----------
 
-$("btnRefresh").addEventListener("click", () => loadList().catch((err) => toast("刷新失败：" + err.message)));
+$("btnRefresh").addEventListener("click", () => loadList({ force: true }).catch((err) => toast("刷新失败：" + err.message)));
 $("btnUp").addEventListener("click", () => {
   state.cwd = state.cwd.split("/").slice(0, -1).join("/");
   loadList().catch((err) => toast("返回失败：" + err.message));
@@ -687,7 +747,7 @@ async function saveNative() {
     $("cloudMsg").textContent = "";
     $("fAuth").value = "";
     await loadStatus();
-    await loadList();
+    await loadList({ force: true });
     toast("已连接云端", "ok");
     $("keyfp").textContent = r && r.fingerprint ? "密钥 " + r.fingerprint + "…" : $("keyfp").textContent;
   } catch (err) {
@@ -827,7 +887,7 @@ $("btnSave").addEventListener("click", async () => {
     $("setupMsg").textContent = "";
     state.xferKeys = null;
     await loadStatus();
-    await loadList();
+    await loadList({ force: true });
     toast("已连接 WebDAV", "ok");
   } catch (err) {
     $("setupMsg").textContent = "失败：" + err.message;
@@ -845,7 +905,8 @@ function uploadOne(file, dir, attempt, onProgress) {
   return new Promise((resolve, reject) => {
     const target = joinPath(dir, file.name).replace(/^\//, "");
     const xhr = new XMLHttpRequest();
-    xhr.open("PUT", "/api/upload?path=" + encodeURIComponent(target));
+    const mt = file.lastModified ? "&mtime=" + Math.floor(file.lastModified / 1000) : "";
+    xhr.open("PUT", "/api/upload?path=" + encodeURIComponent(target) + mt);
     xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) onProgress(ev.loaded / ev.total); };
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) return resolve(JSON.parse(xhr.responseText || "{}"));
@@ -950,7 +1011,7 @@ $("btnMkdir").addEventListener("click", async () => {
     const p = joinPath(state.cwd, name.trim()).replace(/^\//, "");
     await api("/api/mkdir?path=" + encodeURIComponent(p), { method: "POST" });
     toast("已创建 " + name.trim(), "ok");
-    await loadList();
+    await loadList({ force: true });
   } catch (err) {
     toast("创建失败：" + err.message);
   }
@@ -991,6 +1052,73 @@ window.vaultdBack = () => {
   return false;
 };
 
+// ---------- 相册自动同步（只有安卓原生桥才有；PC 上整块隐藏） ----------
+let syncCur = { enabled: false, dir: "相册备份", wifiOnly: false, result: "", hasPermission: true, gateway: true };
+
+function applySyncState(st) {
+  syncCur = st;
+  $("syncState").textContent = st.enabled ? "运行中" : "未开启";
+  $("btnSyncToggle").textContent = st.enabled ? "关闭自动同步" : "开启自动同步";
+  $("btnSyncToggle").classList.toggle("primary", !st.enabled);
+  $("syncDir").value = st.dir || "相册备份";
+  $("btnSyncWifi").textContent = "仅 Wi-Fi：" + (st.wifiOnly ? "开" : "关");
+  $("btnSyncPerm").classList.toggle("hidden", !!st.hasPermission);
+  $("syncMsg").textContent = st.result || "";
+}
+
+function refreshSyncState() {
+  if (!window.Sync) return;
+  try {
+    applySyncState(JSON.parse(window.Sync.state()));
+  } catch (e) { /* 桥还没挂上时忽略 */ }
+}
+
+window.onSyncUpdate = function (msg) {
+  $("syncMsg").textContent = msg || "";
+  refreshSyncState();
+};
+
+function initSyncUI() {
+  const box = $("syncBox");
+  if (!window.Sync) {
+    box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+  refreshSyncState();
+  $("btnSyncToggle").addEventListener("click", () => {
+    try {
+      applySyncState(JSON.parse(window.Sync.setEnabled(!syncCur.enabled)));
+      toast(syncCur.enabled ? "自动同步已开启" : "自动同步已关闭", "ok");
+    } catch (e) {
+      toast("切换失败：" + e.message);
+    }
+  });
+  $("btnSyncNow").addEventListener("click", () => {
+    $("syncMsg").textContent = "同步中…";
+    try { window.Sync.syncNow(); } catch (e) { toast("同步失败：" + e.message); }
+  });
+  $("btnSyncPerm").addEventListener("click", () => {
+    try { window.Sync.requestPermissions(); } catch (e) { toast("授权失败：" + e.message); }
+  });
+  $("btnSyncWifi").addEventListener("click", () => {
+    try {
+      applySyncState(JSON.parse(window.Sync.setWifiOnly(!syncCur.wifiOnly)));
+    } catch (e) { toast("设置失败：" + e.message); }
+  });
+  $("syncDir").addEventListener("change", () => {
+    try {
+      applySyncState(JSON.parse(window.Sync.setDir($("syncDir").value)));
+      toast("同步目录已改为：" + syncCur.dir, "ok");
+    } catch (e) { toast("设置失败：" + e.message); }
+  });
+  // 面板开着的时候隔几秒刷一次状态（同步是后台线程跑，只能轮询）
+  setInterval(() => {
+    if (!$("setupPanel").classList.contains("hidden")) refreshSyncState();
+  }, 5000);
+}
+initSyncUI();
+
 (async function boot() {
   try {
     await loadStatus();
@@ -1002,7 +1130,7 @@ window.vaultdBack = () => {
   // 这里自带退避重试，免得用户对着空白的媒体库以为坏了。
   for (let i = 0; i < 5; i++) {
     try {
-      await loadList();
+      await loadList({ force: true });
       return;
     } catch (e) {
       console.error(e);
@@ -1011,4 +1139,5 @@ window.vaultdBack = () => {
     }
   }
 })();
+
 

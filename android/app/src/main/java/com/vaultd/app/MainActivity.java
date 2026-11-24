@@ -1,8 +1,10 @@
 package com.vaultd.app;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.ContentValues;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -37,6 +39,7 @@ import java.net.URL;
 public class MainActivity extends Activity {
 
     private static final int REQ_FILE = 1001;
+    private static final int REQ_MEDIA = 1002;
 
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
@@ -54,6 +57,14 @@ public class MainActivity extends Activity {
         s.setMediaPlaybackRequiresUserGesture(false);
         s.setAllowFileAccess(false);
         s.setAllowContentAccess(true);
+        // 布局宽度锁在「设备宽度」而不是系统放大后的宽度：
+        // 有些机型的系统字体/显示缩放会让 WebView 的 layout width 变成 800+，
+        // 界面就会突然像平板。这里关掉 wide viewport，并把字号缩放固定回 100%。
+        s.setUseWideViewPort(false);
+        s.setLoadWithOverviewMode(false);
+        s.setTextZoom(100);
+        s.setSupportZoom(false);
+        s.setBuiltInZoomControls(false);
         web.setWebViewClient(new WebViewClient());
         web.setWebChromeClient(new WebChromeClient() {
             @Override
@@ -78,6 +89,9 @@ public class MainActivity extends Activity {
         });
 
         setContentView(web);
+
+        // 设置面板里的「相册自动同步」直接调原生（扫描 MediaStore + 前台服务）
+        web.addJavascriptInterface(new SyncBridge(this), "Sync");
 
         // 普通文件（文档/压缩包/安装包）要能取回：网关是带 cookie 的本地 http，
         // 系统下载器不带 cookie 会 401，所以这里自己拿 InputStream 落盘。
@@ -110,10 +124,14 @@ public class MainActivity extends Activity {
                     final String url = mobile.Mobile.start(
                             getFilesDir().getAbsolutePath());
                     android.util.Log.i("vaultd", "gateway ready: " + url);
+                    rememberGateway(url);
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
                             web.loadUrl(url);
+                            if (SyncPrefs.enabled(MainActivity.this)) {
+                                SyncService.start(MainActivity.this);
+                            }
                         }
                     });
                 } catch (final Exception e) {
@@ -315,8 +333,71 @@ public class MainActivity extends Activity {
         super.onActivityResult(requestCode, resultCode, data);
     }
 
-    private void handleBack() {
-        // 页面内的层级（查看器、子目录）由前端接管；前端返回 false 表示已在根目录，再退出。
+    // ---------- 自动同步：网关地址交给服务，结果回吐给设置面板 ----------
+
+    private void rememberGateway(String url) {
+        try {
+            Uri u = Uri.parse(url);
+            String base = u.getScheme() + "://" + u.getHost() + ":" + u.getPort();
+            String token = u.getQueryParameter("t");
+            if (token != null && !token.isEmpty()) {
+                SyncPrefs.setGateway(this, base, token);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    void notifySyncUpdate(String msg) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (web == null) return;
+                web.evaluateJavascript("(window.onSyncUpdate && window.onSyncUpdate(" + jsStr(msg) + "))", null);
+            }
+        });
+    }
+
+    private static String jsStr(String s) {
+        if (s == null) return "null";
+        StringBuilder b = new StringBuilder("\"");
+        for (int i = 0; i < s.length(); i++) {
+            char ch = s.charAt(i);
+            switch (ch) {
+                case '"': b.append("\\\""); break;
+                case '\\': b.append("\\\\"); break;
+                case '\n': b.append("\\n"); break;
+                case '\r': b.append("\\r"); break;
+                default:
+                    if (ch < 0x20) b.append(String.format("\\u%04x", (int) ch));
+                    else b.append(ch);
+            }
+        }
+        return b.append('"').toString();
+    }
+
+    void requestMediaPermissions() {
+        String[] perms;
+        if (Build.VERSION.SDK_INT >= 33) {
+            perms = new String[]{Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO};
+        } else {
+            perms = new String[]{Manifest.permission.READ_EXTERNAL_STORAGE};
+        }
+        try {
+            requestPermissions(perms, REQ_MEDIA);
+        } catch (Exception ignored) {
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (requestCode == REQ_MEDIA) {
+            notifySyncUpdate(SyncBridge.hasMediaPermission(this) ? "已获得相册权限" : "还没有相册权限");
+            return;
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    }
+
+    private void handleBack() {        // 页面内的层级（查看器、子目录）由前端接管；前端返回 false 表示已在根目录，再退出。
         if (web == null) {
             finish();
             return;
@@ -341,7 +422,8 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         try {
-            mobile.Mobile.stop();
+            // 自动同步开着的时候别把网关停了：后台服务要靠它加密上传。
+            if (!SyncPrefs.enabled(this)) mobile.Mobile.stop();
         } catch (Exception ignored) {
         }
         if (web != null) {

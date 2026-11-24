@@ -78,6 +78,21 @@
         <span id="setupMsg" class="muted"></span>
       </div>
     </div>
+
+    <div id="syncBox" class="hidden">
+      <h2>相册自动同步 <span class="muted" id="syncState">未开启</span></h2>
+      <p class="hint">App 在后台每 15 分钟扫一次系统相机/相册里的新照片和视频，直接加密传到云端的这个目录里；已经传过的不再重复传。</p>
+      <div class="row">
+        <button id="btnSyncToggle" class="tap">开启自动同步</button>
+        <button id="btnSyncNow" class="ghost tap">立即同步</button>
+        <button id="btnSyncPerm" class="ghost tap hidden">授权访问相册</button>
+      </div>
+      <div class="grid">
+        <label>云端目录<input id="syncDir" placeholder="相册备份" value="相册备份" autocomplete="off"></label>
+        <label>网络<button id="btnSyncWifi" class="ghost tap" style="width:100%">仅 Wi-Fi：关</button></label>
+      </div>
+      <p class="hint" id="syncMsg"></p>
+    </div>
   </section>
 
   <section class="panel">

@@ -211,11 +211,29 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// 大文件给足时间：单次 PUT 的上限来自这里，而不是全局超时
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
-	if err := v.Upload(ctx, remote, r.Body, size); err != nil {
+	if err := v.UploadAt(ctx, remote, r.Body, size, uploadMTime(r)); err != nil {
 		writeErr(w, fmt.Errorf("上传失败: %w", err))
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "path": path.Join("/", remote), "size": size})
+}
+
+// uploadMTime 取上传端给的原始修改时间（unix 秒）。浏览器用 file.lastModified，
+// 安卓自动同步用 MediaStore 的 DATE_MODIFIED；没传就当作「现在」。
+func uploadMTime(r *http.Request) time.Time {
+	v := r.URL.Query().Get("mtime")
+	if v == "" {
+		return time.Time{}
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return time.Time{}
+	}
+	// 毫秒也兼容一下（超过 1e12 说明是毫秒）
+	if n > 1e12 {
+		n /= 1000
+	}
+	return time.Unix(n, 0)
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {

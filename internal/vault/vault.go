@@ -8,6 +8,7 @@ package vault
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/rclone/rclone/backend/chunker"
@@ -42,6 +44,23 @@ type Vault struct {
 	f      fs.Fs
 	conn   string
 	closer io.Closer
+
+	// 原始修改时间索引：云盘只记「上传时间」，而照片/文档真正的拍摄、修改时间
+	// 只在上传端拿得到。这里把 path → (mtime,size) 存成密文里的一张小表，
+	// 跟着 crypt 一起加密，多设备打开同一把钥匙都能看到原始时间。
+	idxMu     sync.Mutex
+	idx       map[string]metaEntry
+	idxLoaded bool
+	idxDirty  bool
+	idxTimer  *time.Timer
+}
+
+// metaName 是索引文件在密文库根目录下的名字；列表里会被隐藏。
+const metaName = ".vaultd-index.json"
+
+type metaEntry struct {
+	MTime int64 `json:"mtime"`
+	Size  int64 `json:"size"`
 }
 
 // ConnectionString 组装 chunker(crypt(webdav)) 三层。
@@ -164,21 +183,33 @@ func (v *Vault) List(ctx context.Context, dir string) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	v.loadMeta(ctx)
 	out := make([]Entry, 0, len(list))
+	v.idxMu.Lock()
 	for _, e := range list {
 		name := path.Base(e.Remote())
-		if name == "." || name == "/" || name == "" {
+		if name == "." || name == "/" || name == "" || name == metaName {
 			continue
 		}
 		_, isDir := e.(fs.Directory)
+		size := e.Size()
+		mt := e.ModTime(ctx)
+		if !isDir && size > 0 {
+			// 只有「名字 + 大小」都对得上才采用记录的时间：
+			// 同一路径被重新上传/覆盖时 cloud 时间才是准的。
+			if m, ok := v.idx[path.Join("/", dir, name)]; ok && m.Size == size && m.MTime > 0 {
+				mt = time.Unix(m.MTime, 0)
+			}
+		}
 		out = append(out, Entry{
 			Name:    name,
 			Path:    path.Join("/", dir, name),
 			Dir:     isDir,
-			Size:    e.Size(),
-			ModTime: e.ModTime(ctx),
+			Size:    size,
+			ModTime: mt,
 		})
 	}
+	v.idxMu.Unlock()
 	return out, nil
 }
 
@@ -200,12 +231,133 @@ func (v *Vault) Stat(ctx context.Context, remote string) (fs.Object, error) {
 // Upload 以流式方式写入一个对象；size 必须准确（浏览器上传时取 Content-Length）。
 // 分片内重传由上层决定，这里只做一次写入。
 func (v *Vault) Upload(ctx context.Context, remote string, r io.Reader, size int64) error {
+	return v.UploadAt(ctx, remote, r, size, time.Time{})
+}
+
+// UploadAt 带原始修改时间上传。mtime 为空时退化为上传时间。
+func (v *Vault) UploadAt(ctx context.Context, remote string, r io.Reader, size int64, mtime time.Time) error {
 	remote = cleanRel(remote)
+	putTime := mtime
+	if putTime.IsZero() {
+		putTime = time.Now()
+	}
 	// 名字必须带上完整相对路径：Fs.Put 是按 info.Name() 落盘的，
 	// 只给 Base 会把所有上传都丢到根目录（子目录名被吃掉）。
-	info := object.NewStaticObjectInfo(remote, time.Now(), size, true, nil, v.f)
-	_, err := v.f.Put(ctx, r, info)
-	return err
+	info := object.NewStaticObjectInfo(remote, putTime, size, true, nil, v.f)
+	if _, err := v.f.Put(ctx, r, info); err != nil {
+		return err
+	}
+	// 云端只会记下「此刻」，真正的原始时间靠密文库里的索引补回来。
+	v.rememberMeta(ctx, remote, size, putTime.Unix())
+	return nil
+}
+
+// rememberMeta 记下某个路径的原始时间，并合并写盘（1.2s 内的多次上传只写一次）。
+func (v *Vault) rememberMeta(ctx context.Context, remote string, size, mtime int64) {
+	v.idxMu.Lock()
+	v.loadMetaLocked(ctx)
+	v.idx[path.Join("/", remote)] = metaEntry{MTime: mtime, Size: size}
+	v.idxDirty = true
+	needTimer := v.idxTimer == nil
+	v.idxMu.Unlock()
+	if needTimer {
+		v.idxTimer = time.AfterFunc(1200*time.Millisecond, func() {
+			fctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			if err := v.FlushMeta(fctx); err != nil {
+				fs.Logf(v.f, "写时间索引失败: %v", err)
+			}
+		})
+	}
+}
+
+// forgetMeta 删除某个路径（及它下面所有子项）的时间记录。
+func (v *Vault) forgetMeta(ctx context.Context, remote string) {
+	p := path.Join("/", cleanRel(remote))
+	v.idxMu.Lock()
+	v.loadMetaLocked(ctx)
+	changed := false
+	for k := range v.idx {
+		if k == p || strings.HasPrefix(k, p+"/") {
+			delete(v.idx, k)
+			changed = true
+			continue
+		}
+	}
+	if changed {
+		v.idxDirty = true
+	}
+	need := v.idxTimer == nil
+	v.idxMu.Unlock()
+	if changed && need {
+		v.idxTimer = time.AfterFunc(1200*time.Millisecond, func() {
+			fctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			_ = v.FlushMeta(fctx)
+		})
+	}
+}
+
+func (v *Vault) loadMeta(ctx context.Context) {
+	v.idxMu.Lock()
+	defer v.idxMu.Unlock()
+	v.loadMetaLocked(ctx)
+}
+
+func (v *Vault) loadMetaLocked(ctx context.Context) {
+	if v.idxLoaded {
+		return
+	}
+	v.idxLoaded = true
+	v.idx = map[string]metaEntry{}
+	o, err := v.f.NewObject(ctx, metaName)
+	if err != nil {
+		return
+	}
+	rc, err := o.Open(ctx)
+	if err != nil {
+		return
+	}
+	defer rc.Close()
+	var doc metaDoc
+	if err := json.NewDecoder(io.LimitReader(rc, 16<<20)).Decode(&doc); err == nil && doc.Files != nil {
+		v.idx = doc.Files
+	}
+}
+
+type metaDoc struct {
+	Version int                  `json:"version"`
+	Files   map[string]metaEntry `json:"files"`
+}
+
+// FlushMeta 把内存里的时间索引写回密文库（小文件，覆盖写）。
+func (v *Vault) FlushMeta(ctx context.Context) error {
+	v.idxMu.Lock()
+	if !v.idxDirty {
+		v.idxTimer = nil
+		v.idxMu.Unlock()
+		return nil
+	}
+	files := make(map[string]metaEntry, len(v.idx))
+	for k, val := range v.idx {
+		files[k] = val
+	}
+	v.idxDirty = false
+	v.idxTimer = nil
+	v.idxMu.Unlock()
+
+	b, err := json.Marshal(metaDoc{Version: 1, Files: files})
+	if err != nil {
+		return err
+	}
+	info := object.NewStaticObjectInfo(metaName, time.Now(), int64(len(b)), true, nil, v.f)
+	if _, err := v.f.Put(ctx, strings.NewReader(string(b)), info); err != nil {
+		v.idxMu.Lock()
+		v.idxDirty = true
+		v.idxMu.Unlock()
+		return err
+	}
+	return nil
 }
 
 // OpenRange 打开 [start, end] 闭区间的解密流。
@@ -244,13 +396,18 @@ func (v *Vault) Delete(ctx context.Context, remote string) error {
 	if remote == "" {
 		return errors.New("不能删除根目录")
 	}
-	if _, err := v.f.NewObject(ctx, remote); err == nil {
-		return v.Remove(ctx, remote)
+	var err error
+	if _, e := v.f.NewObject(ctx, remote); e == nil {
+		err = v.Remove(ctx, remote)
+	} else if _, e := v.f.List(ctx, remote); e == nil {
+		err = v.rmTree(ctx, remote, 0)
+	} else {
+		err = v.Remove(ctx, remote)
 	}
-	if _, err := v.f.List(ctx, remote); err == nil {
-		return v.rmTree(ctx, remote, 0)
+	if err == nil {
+		v.forgetMeta(ctx, remote)
 	}
-	return v.Remove(ctx, remote)
+	return err
 }
 
 // rmTree 递归清空目录再删掉它：WebDAV 不支持「递归删除目录」，
