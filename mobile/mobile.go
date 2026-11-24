@@ -16,9 +16,12 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	"vaultd/internal/cloud139"
 	"vaultd/internal/localcfg"
 	"vaultd/internal/server"
 )
@@ -42,6 +45,23 @@ func Start(homeDir string) (string, error) {
 	if homeDir != "" {
 		if err := os.Setenv("VAULTD_HOME", homeDir); err != nil {
 			return "", err
+		}
+		// 安卓的 os.TempDir() 是 /data/local/tmp，App 没有写权限；
+		// 上传要落中转文件算 SHA256，所以必须指到自己的私有目录。
+		tmp := filepath.Join(homeDir, "tmp")
+		if err := os.MkdirAll(tmp, 0o700); err != nil {
+			return "", fmt.Errorf("创建临时目录失败: %w", err)
+		}
+		_ = os.Setenv("TMPDIR", tmp)
+		cloud139.TempDirOverride = tmp
+		// 上次进程被杀时留下的中转文件没必要继续占空间
+		if ents, err := os.ReadDir(tmp); err == nil {
+			for _, e := range ents {
+				if e.IsDir() || !strings.HasSuffix(e.Name(), ".part") {
+					continue
+				}
+				_ = os.Remove(filepath.Join(tmp, e.Name()))
+			}
 		}
 	}
 	cfg, err := localcfg.Load()

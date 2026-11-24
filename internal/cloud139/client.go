@@ -50,10 +50,10 @@ type File struct {
 type Client struct {
 	http *http.Client
 
-	mu    sync.Mutex
-	auth  string // base64(authorization)
-	acct  string
-	host  string // 个人云 API 根地址，由路由策略下发
+	mu        sync.Mutex
+	auth      string // base64(authorization)
+	acct      string
+	host      string // 个人云 API 根地址，由路由策略下发
 	onNewAuth func(string)
 }
 
@@ -515,11 +515,30 @@ type uploadPartInfo struct {
 	UploadURL  string `json:"uploadUrl"`
 }
 
+// TempDirOverride 显式指定上传中转文件的落盘目录。
+// 安卓上 os.TempDir() 是 /data/local/tmp（App 无写权限），必须由宿主 App 指到私有目录；
+// 留空则沿用系统默认（PC 端行为不变）。
+var TempDirOverride string
+
+func createTempFile(pattern string) (*os.File, error) {
+	if TempDirOverride != "" {
+		return os.CreateTemp(TempDirOverride, pattern)
+	}
+	return os.CreateTemp("", pattern)
+}
+
+func tmpPrintDir() string {
+	if TempDirOverride != "" {
+		return TempDirOverride
+	}
+	return os.TempDir()
+}
+
 // Upload 上传一个文件。r 会被完整读一次（落临时文件），以便算 SHA256 与分片重传。
 func (c *Client) Upload(ctx context.Context, parentID, name string, r io.Reader, size int64, progress func(done, total int64)) error {
-	tmp, err := os.CreateTemp("", "cloud139-*.part")
+	tmp, err := createTempFile("cloud139-*.part")
 	if err != nil {
-		return err
+		return fmt.Errorf("创建上传中转文件失败（临时目录 %q 不可写）: %w", tmpPrintDir(), err)
 	}
 	defer func() {
 		tmp.Close()
