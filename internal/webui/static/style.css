@@ -110,13 +110,35 @@ textarea { resize: vertical; font-size: 12px; }
 .tile-ph img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .tile-ph.video { background: linear-gradient(150deg, #1b3b46, #10161c 65%); color: #7fd6c8; }
 .tile-ph.audio { background: linear-gradient(150deg, #2c2740, #10161c 65%); color: #bb9ff0; }
-.tile-ph.file { background: #141b22; color: #7d8b99; }
 .tile-ph.dir { background: linear-gradient(160deg, #24303a, #131a21); color: #e0b34e; }
+.tile-ph.doc { background: linear-gradient(150deg, #2f2a24, #131a21 65%); color: #e9c07a; }
+.tile-ph.archive { background: linear-gradient(150deg, #33262b, #131a21 65%); color: #e79a9a; }
+.tile-ph.code { background: linear-gradient(150deg, #22301f, #131a21 65%); color: #a7d68e; }
+.tile-ph.pkg { background: linear-gradient(150deg, #26293a, #131a21 65%); color: #a7b6f0; }
+.tile-ph.file { background: #141b22; color: #7d8b99; }
 .tile-ph .glyph { font-size: 26px; }
 .tile-badge {
   position: absolute; top: 6px; left: 6px; font-size: 10px; letter-spacing: .4px;
   background: rgba(0,0,0,.55); color: #cfe9e4; border-radius: 6px; padding: 1px 5px;
 }
+.tile-badge.doc { color: #f0d9a8; }
+.tile-badge.archive { color: #f3b9b9; }
+.tile-badge.code { color: #c6ebaf; }
+.tile-badge.pkg { color: #c3cdf5; }
+
+/* 分类筛选条：横向滚动，手机上不换行 */
+.filters {
+  display: flex; gap: 6px; padding: 10px 6px 8px; overflow-x: auto;
+  scrollbar-width: none; -webkit-overflow-scrolling: touch;
+}
+.filters::-webkit-scrollbar { display: none; }
+.chip {
+  flex: none; display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; min-height: 34px; border-radius: 999px;
+  background: #121a22; border: 1px solid var(--line); color: var(--muted); font-size: 12px;
+}
+.chip.on { color: var(--accent); border-color: rgba(20,184,166,.55); background: rgba(20,184,166,.12); }
+.chip .n { font-size: 11px; opacity: .75; }
 .tile-meta {
   position: absolute; left: 0; right: 0; bottom: 0; padding: 20px 7px 6px;
   background: linear-gradient(to top, rgba(0,0,0,.82) 12%, rgba(0,0,0,0));
@@ -181,6 +203,24 @@ textarea { resize: vertical; font-size: 12px; }
 .viewer-nav.next { right: 6px; }
 .viewer-nav:active { background: rgba(20,184,166,.4); }
 .viewer-foot { padding: 6px 14px calc(8px + var(--safe-b)); border-top: 1px solid var(--line); font-size: 12px; }
+
+/* 普通文件详情卡 */
+.filecard {
+  width: min(420px, 92%); margin: auto; text-align: center;
+  background: #0e141a; border: 1px solid var(--line); border-radius: 16px; padding: 22px 18px 16px;
+}
+.filecard .fc-icon {
+  width: 64px; height: 64px; margin: 0 auto 12px; border-radius: 16px;
+  display: flex; align-items: center; justify-content: center; font-size: 30px;
+  background: #18212a; border: 1px solid var(--line);
+}
+.filecard .fc-name { font-size: 15px; font-weight: 600; word-break: break-all; }
+.filecard .fc-sub { color: var(--muted); font-size: 12px; margin-top: 6px; }
+.filecard .fc-path {
+  color: var(--muted); font-size: 11px; margin: 10px 0 16px; word-break: break-all;
+  background: #0a1017; border-radius: 8px; padding: 6px 8px;
+}
+.filecard .fc-tip { margin: 12px 0 0; line-height: 1.5; }
 
 /* ---------- toast ---------- */
 .toast {

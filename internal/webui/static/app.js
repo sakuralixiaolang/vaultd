@@ -9,6 +9,7 @@ const state = {
   nativeFormOpen: false,
   view: localStorage.getItem("vaultd.view") || "grid",
   sort: localStorage.getItem("vaultd.sort") || "name",
+  filter: localStorage.getItem("vaultd.filter") || "all",
   viewer: { items: [], index: -1, zoom: false },
 };
 const $ = (id) => document.getElementById(id);
@@ -122,38 +123,99 @@ function renderList() {
   box.innerHTML = "";
   $("btnGrid").classList.toggle("on", state.view === "grid");
   $("btnList").classList.toggle("on", state.view === "list");
+  renderFilters();
 
-  if (!state.entries.length) {
+  const shown = sortedEntries().filter(matchesFilter);
+  if (!shown.length) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.innerHTML = `<div class="big">🗂️</div><p>这里是空的</p>
-      <button class="primary tap" id="btnEmptyUp">上传文件</button>`;
     empty.style.gridColumn = "1 / -1";
+    const filtered = state.filter !== "all";
+    empty.innerHTML = `<div class="big">${filtered ? "🗂️" : "🗂️"}</div>
+      <p>${filtered ? "这个分类下还没有文件" : "这里是空的，可以上传照片、视频或任意文件"}</p>
+      <button class="primary tap" id="btnEmptyUp">${filtered ? "上传到当前目录" : "上传第一个文件"}</button>`;
     box.appendChild(empty);
     $("btnEmptyUp").addEventListener("click", () => $("fileInput").click());
     return;
   }
-  for (const e of sortedEntries()) {
+  for (const e of shown) {
     box.appendChild(state.view === "grid" ? tileEl(e) : rowEl(e));
   }
 }
 
+function renderFilters() {
+  const bar = $("filters");
+  const counts = {
+    all: state.entries.length,
+    image: state.entries.filter((e) => !e.dir && isImage(e.name)).length,
+    video: state.entries.filter((e) => !e.dir && isVideo(e.name)).length,
+    file: state.entries.filter((e) => !e.dir && !isImage(e.name) && !isVideo(e.name)).length,
+  };
+  const defs = [["all", "全部"], ["image", "图片"], ["video", "视频"], ["file", "文件"]];
+  bar.innerHTML = "";
+  for (const [key, label] of defs) {
+    const b = document.createElement("button");
+    b.className = "chip tap" + (state.filter === key ? " on" : "");
+    b.innerHTML = `${label}<span class="n">${counts[key]}</span>`;
+    b.addEventListener("click", () => {
+      state.filter = key;
+      localStorage.setItem("vaultd.filter", key);
+      renderList();
+    });
+    bar.appendChild(b);
+  }
+}
+
 const EXT_IMG = ["jpg", "jpeg", "png", "gif", "webp", "bmp"];
+const EXT_VIDEO = ["mp4", "m4v", "mkv", "mov", "webm", "avi"];
+const EXT_AUDIO = ["mp3", "flac", "m4a", "wav", "aac", "ogg"];
+const EXT_DOC = ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "md", "csv", "epub", "rtf", "odt", "pages", "numbers", "key"];
+const EXT_ARCHIVE = ["zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "zst", "iso"];
+const EXT_CODE = ["json", "xml", "yaml", "yml", "js", "ts", "py", "go", "java", "c", "h", "cpp", "sh", "ps1", "ini", "conf", "log", "sql", "html", "css", "toml"];
+const EXT_PKG = ["apk", "exe", "msi", "deb", "dmg", "ipa", "appx"];
 const extOf = (n) => (n.split(".").pop() || "").toLowerCase();
 const isImage = (n) => EXT_IMG.includes(extOf(n));
-const isVideo = (n) => ["mp4", "m4v", "mkv", "mov", "webm", "avi"].includes(extOf(n));
-const isAudio = (n) => ["mp3", "flac", "m4a", "wav", "aac", "ogg"].includes(extOf(n));
+const isVideo = (n) => EXT_VIDEO.includes(extOf(n));
+const isAudio = (n) => EXT_AUDIO.includes(extOf(n));
+
+// 非媒体文件也分类，决定图标与角标颜色
+function fileKind(name) {
+  const e = extOf(name);
+  if (EXT_ARCHIVE.includes(e)) return "archive";
+  if (EXT_DOC.includes(e)) return "doc";
+  if (EXT_CODE.includes(e)) return "code";
+  if (EXT_PKG.includes(e)) return "pkg";
+  return "file";
+}
+const KIND_LABEL = { archive: "压缩包", doc: "文档", code: "文本", pkg: "安装包", file: "文件", image: "图片", video: "视频", audio: "音频" };
+function kindGlyph(name) {
+  if (isImage(name)) return "🖼️";
+  if (isVideo(name)) return "🎬";
+  if (isAudio(name)) return "🎧";
+  switch (fileKind(name)) {
+    case "archive": return "📦";
+    case "doc": return extOf(name) === "pdf" ? "📕" : "📘";
+    case "code": return "🧾";
+    case "pkg": return "💿";
+    default: return "📄";
+  }
+}
+function matchesFilter(e) {
+  if (state.filter === "all") return true;
+  if (e.dir) return false;
+  if (state.filter === "image") return isImage(e.name);
+  if (state.filter === "video") return isVideo(e.name);
+  return !isImage(e.name) && !isVideo(e.name);
+}
 const thumbURL = (e, w) => "/api/thumb?w=" + w + "&path=" + encodeURIComponent(e.path);
+const streamURL = (e, dl) => "/api/stream?path=" + encodeURIComponent(e.path) + (dl ? "&dl=1" : "");
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 function fallbackGlyph(name) {
-  if (isImage(name)) return "🖼️";
-  if (isVideo(name)) return "🎬";
-  if (isAudio(name)) return "🎧";
-  return "📄";
+  return kindGlyph(name);
 }
 
 function tileEl(e) {
@@ -165,15 +227,10 @@ function tileEl(e) {
     ph = `<div class="tile-ph dir"><span class="glyph">📁</span></div>`;
   } else if (isImage(e.name)) {
     ph = `<div class="tile-ph"><span class="glyph">${fallbackGlyph(e.name)}</span></div>`;
-  } else if (isVideo(e.name)) {
-    ph = `<div class="tile-ph video"><span class="glyph">▶</span></div>`;
-    badge = `<span class="tile-badge">${escapeHtml(extOf(e.name).toUpperCase())}</span>`;
-  } else if (isAudio(e.name)) {
-    ph = `<div class="tile-ph audio"><span class="glyph">🎧</span></div>`;
-    badge = `<span class="tile-badge">${escapeHtml(extOf(e.name).toUpperCase())}</span>`;
   } else {
-    ph = `<div class="tile-ph file"><span class="glyph">📄</span></div>`;
-    badge = `<span class="tile-badge">${escapeHtml(extOf(e.name).toUpperCase() || "FILE")}</span>`;
+    const kind = isVideo(e.name) ? "video" : isAudio(e.name) ? "audio" : fileKind(e.name);
+    ph = `<div class="tile-ph ${kind}"><span class="glyph">${kindGlyph(e.name)}</span></div>`;
+    badge = `<span class="tile-badge ${kind}">${escapeHtml(extOf(e.name).toUpperCase() || "FILE")}</span>`;
   }
   el.innerHTML = `${ph}${badge}
     <button class="kill" title="删除">✕</button>
@@ -210,7 +267,7 @@ function rowEl(e) {
   }
   el.innerHTML = `<div class="thumb">${thumb}</div>
     <div class="txt"><div class="name">${escapeHtml(e.name)}</div>
-    <div class="sub">${e.dir ? "文件夹" : fmtSize(e.size) + (e.mod_time ? " · " + fmtDate(e.mod_time) : "")}</div></div>
+    <div class="sub">${e.dir ? "文件夹" : KIND_LABEL[isImage(e.name) ? "image" : isVideo(e.name) ? "video" : isAudio(e.name) ? "audio" : fileKind(e.name)] + " · " + fmtSize(e.size) + (e.mod_time ? " · " + fmtDate(e.mod_time) : "")}</div></div>
     <button class="del ghost" title="删除">✕</button>`;
   const img = el.querySelector(".thumb img");
   if (img) img.addEventListener("error", () => { el.querySelector(".thumb").textContent = fallbackGlyph(e.name); });
@@ -246,11 +303,54 @@ function viewerItems() {
 }
 
 async function openViewer(e) {
+  if (!isImage(e.name) && !isVideo(e.name)) {
+    state.viewer = { items: [], index: -1, zoom: false };
+    $("viewer").classList.remove("hidden");
+    renderFileDetail(e);
+    return;
+  }
   const items = viewerItems();
   const index = items.findIndex((it) => it.path === e.path);
   state.viewer = { items, index: index >= 0 ? index : 0, zoom: false };
   $("viewer").classList.remove("hidden");
   renderViewer();
+}
+
+// 普通文件（文档 / 压缩包 / 安装包 / 任意未知格式）走详情页，不做预览，重点是可取回
+function renderFileDetail(e) {
+  const body = $("viewerBody");
+  body.innerHTML = "";
+  body.classList.remove("zoomed");
+  body.scrollTop = 0;
+  body.scrollLeft = 0;
+  const kind = isAudio(e.name) ? "audio" : fileKind(e.name);
+  const label = KIND_LABEL[kind] || "文件";
+  $("viewerTitle").textContent = e.name;
+  $("viewerFoot").textContent = label + " · " + fmtSize(e.size) + (e.mod_time ? " · " + fmtDate(e.mod_time) : "");
+  $("btnJump").classList.add("hidden");
+  $("btnPrev").classList.add("hidden");
+  $("btnNext").classList.add("hidden");
+  gesture.img = null;
+
+  const card = document.createElement("div");
+  card.className = "filecard";
+  card.innerHTML = `<div class="fc-icon ${kind}">${kindGlyph(e.name)}</div>
+    <div class="fc-name">${escapeHtml(e.name)}</div>
+    <div class="fc-sub">${label} · ${fmtSize(e.size)}${e.mod_time ? " · " + fmtDate(e.mod_time) : ""}</div>
+    <div class="fc-path">${escapeHtml(e.path)}</div>
+    <button class="primary tap" id="btnDownload">下载到本机</button>
+    <p class="hint fc-tip">安卓保存到系统「下载」目录，PC 浏览器直接另存为；文件名是解密后的原名。</p>`;
+  body.appendChild(card);
+  $("btnDownload").addEventListener("click", () => {
+    const a = document.createElement("a");
+    a.href = streamURL(e, true);
+    a.download = e.name;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    toast("已开始下载 " + e.name, "ok");
+  });
 }
 
 function renderViewer() {

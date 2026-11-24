@@ -1,10 +1,16 @@
 package com.vaultd.app;
 
 import android.app.Activity;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.view.ViewGroup;
+import android.webkit.CookieManager;
+import android.webkit.DownloadListener;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
@@ -12,6 +18,16 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+import android.widget.Toast;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URLDecoder;
+import java.net.URL;
 
 /**
  * 单 Activity：进程内起 Go 网关（rclone crypt + chunker + WebDAV），
@@ -63,6 +79,17 @@ public class MainActivity extends Activity {
 
         setContentView(web);
 
+        // 普通文件（文档/压缩包/安装包）要能取回：网关是带 cookie 的本地 http，
+        // 系统下载器不带 cookie 会 401，所以这里自己拿 InputStream 落盘。
+        CookieManager.getInstance().setAcceptCookie(true);
+        web.setDownloadListener(new DownloadListener() {
+            @Override
+            public void onDownloadStart(String url, String userAgent, String contentDisposition,
+                                        String mimetype, long contentLength) {
+                downloadFile(url, contentDisposition, mimetype);
+            }
+        });
+
         // targetSdk 33+ 的系统默认走「预测性返回」回调，onBackPressed 根本不会被调用，
         // 所以要显式注册 OnBackInvokedCallback；老系统仍走 onBackPressed。
         if (android.os.Build.VERSION.SDK_INT >= 33) {
@@ -99,6 +126,155 @@ public class MainActivity extends Activity {
                 }
             }
         }).start();
+    }
+
+    // ---------- 下载：把网关解出来的明文写到系统「下载」目录 ----------
+
+    private void downloadFile(final String url, final String disposition, final String mimetype) {
+        if (url == null || (!url.startsWith("http://127.0.0.1") && !url.startsWith("http://localhost"))) {
+            Toast.makeText(this, "只支持从本机网关下载", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final String name = safeName(fileNameFrom(disposition, url));
+        Toast.makeText(this, "开始下载 " + name, Toast.LENGTH_SHORT).show();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                HttpURLConnection conn = null;
+                InputStream in = null;
+                OutputStream out = null;
+                Uri pending = null;
+                try {
+                    conn = (HttpURLConnection) new URL(url).openConnection();
+                    String cookie = CookieManager.getInstance().getCookie(url);
+                    if (cookie != null && cookie.length() > 0) {
+                        conn.setRequestProperty("Cookie", cookie);
+                    }
+                    conn.setConnectTimeout(15000);
+                    conn.setReadTimeout(600000);
+                    int code = conn.getResponseCode();
+                    if (code != 200 && code != 206) {
+                        throw new IOException("HTTP " + code);
+                    }
+                    in = conn.getInputStream();
+                    final String mime = (mimetype == null || mimetype.length() == 0)
+                            ? "application/octet-stream" : mimetype;
+                    if (Build.VERSION.SDK_INT >= 29) {
+                        ContentValues v = new ContentValues();
+                        v.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+                        v.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+                        v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+                        v.put(MediaStore.MediaColumns.IS_PENDING, 1);
+                        pending = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                        if (pending == null) {
+                            throw new IOException("无法创建下载文件");
+                        }
+                        out = getContentResolver().openOutputStream(pending);
+                    } else {
+                        File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+                        if (dir == null) {
+                            dir = getFilesDir();
+                        }
+                        if (!dir.exists()) {
+                            dir.mkdirs();
+                        }
+                        out = new FileOutputStream(new File(dir, name));
+                    }
+                    byte[] buf = new byte[64 * 1024];
+                    long total = 0;
+                    int n;
+                    while ((n = in.read(buf)) > 0) {
+                        out.write(buf, 0, n);
+                        total += n;
+                    }
+                    out.flush();
+                    if (pending != null) {
+                        ContentValues done = new ContentValues();
+                        done.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                        getContentResolver().update(pending, done, null, null);
+                    }
+                    final long size = total;
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            Toast.makeText(MainActivity.this,
+                                    "已保存到「下载」：" + name + "（" + human(size) + "）",
+                                    Toast.LENGTH_LONG).show();
+                        }
+                    });
+                } catch (final Exception e) {
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            Toast.makeText(MainActivity.this, "下载失败：" + e.getMessage(),
+                                    Toast.LENGTH_LONG).show();
+                        }
+                    });
+                } finally {
+                    closeQuietly(in);
+                    closeQuietly(out);
+                    if (conn != null) {
+                        conn.disconnect();
+                    }
+                }
+            }
+        }).start();
+    }
+
+    private static void closeQuietly(java.io.Closeable c) {
+        if (c != null) {
+            try {
+                c.close();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    // 优先用服务端的 filename*=UTF-8''（解密后的原名），退回 URL 里的 path 参数
+    private String fileNameFrom(String disposition, String url) {
+        try {
+            if (disposition != null) {
+                int i = disposition.indexOf("filename*=UTF-8''");
+                if (i >= 0) {
+                    String tail = disposition.substring(i + 17);
+                    int semi = tail.indexOf(';');
+                    if (semi >= 0) {
+                        tail = tail.substring(0, semi);
+                    }
+                    return URLDecoder.decode(tail.trim().replace("\"", ""), "UTF-8");
+                }
+                i = disposition.indexOf("filename=");
+                if (i >= 0) {
+                    return disposition.substring(i + 9).trim().replace("\"", "");
+                }
+            }
+            String p = Uri.parse(url).getQueryParameter("path");
+            if (p != null && p.length() > 0) {
+                return p.substring(p.lastIndexOf('/') + 1);
+            }
+        } catch (Exception ignored) {
+        }
+        return "download.bin";
+    }
+
+    private String safeName(String raw) {
+        String n = raw == null ? "" : raw.replace('\\', '_').replace('/', '_').trim();
+        while (n.startsWith(".")) {
+            n = n.substring(1);
+        }
+        return n.length() == 0 ? "download.bin" : n;
+    }
+
+    private static String human(long n) {
+        if (n < 1024) return n + " B";
+        String[] u = {"KB", "MB", "GB", "TB"};
+        double v = n;
+        int i = -1;
+        do {
+            v /= 1024;
+            i++;
+        } while (v >= 1024 && i < u.length - 1);
+        return String.format(java.util.Locale.US, v >= 10 ? "%.0f %s" : "%.1f %s", v, u[i]);
     }
 
     private void showError(Exception e) {

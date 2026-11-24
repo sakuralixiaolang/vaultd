@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -70,7 +71,7 @@ func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !thumbExtOK(remote) {
-		writeErr(w, errThumbUnsupported)
+		writeThumbStatus(w, http.StatusUnsupportedMediaType, errThumbUnsupported)
 		return
 	}
 	want := 360
@@ -100,7 +101,7 @@ func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if obj.Size() > maxThumbSrc {
-		writeErr(w, errors.New("图片太大，不生成缩略图"))
+		writeThumbStatus(w, http.StatusRequestEntityTooLarge, errors.New("图片太大，不生成缩略图"))
 		return
 	}
 	key := fmt.Sprintf("%s|%d|%d|%d", strings.Trim(remote, "/"), obj.Size(), obj.ModTime(ctx).Unix(), want)
@@ -178,8 +179,16 @@ func buildThumb(ctx context.Context, v *vault.Vault, remote string, want int) ([
 	return buf.Bytes(), nil
 }
 
-func serveThumb(w http.ResponseWriter, data []byte) {
-	h := w.Header()
+// 缩略图不是核心能力：格式不支持/图太大用 415/413 明确表达，让前端直接退回图标
+func writeThumbStatus(w http.ResponseWriter, status int, err error) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"ok": false, "code": "THUMB_UNAVAILABLE", "message": err.Error(), "retryable": false,
+	})
+}
+
+func serveThumb(w http.ResponseWriter, data []byte) {	h := w.Header()
 	h.Set("Content-Type", "image/jpeg")
 	h.Set("Content-Length", strconv.Itoa(len(data)))
 	h.Set("Cache-Control", fmt.Sprintf("private, max-age=%d", int(thumbMaxAge.Seconds())))

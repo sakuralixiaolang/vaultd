@@ -15,6 +15,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -239,6 +240,20 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	h.Set("Accept-Ranges", "bytes")
 	h.Set("Content-Type", contentTypeFor(remote))
 	h.Set("Cache-Control", "no-store")
+	// dl=1 时按附件下发：浏览器/安卓端保存时用的是解密后的原名，而不是乱码对象名
+	if r.URL.Query().Get("dl") == "1" {
+		base := path.Base(remote)
+		ascii := strings.Map(func(c rune) rune {
+			if c < 0x20 || c > 0x7e {
+				return '_'
+			}
+			return c
+		}, base)
+		if strings.Trim(ascii, "_") == "" {
+			ascii = "download.bin"
+		}
+		h.Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s", ascii, url.PathEscape(base)))
+	}
 
 	if r.Method == http.MethodHead {
 		h.Set("Content-Length", strconv.FormatInt(size, 10))
