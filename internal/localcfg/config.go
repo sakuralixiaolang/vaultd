@@ -46,9 +46,13 @@ type Config struct {
 
 func defaults() *Config {
 	return &Config{
-		RemotePath: "vault",
-		ChunkSize:  "500Mi",
-		Listen:     "127.0.0.1:0",
+		// 现在的默认形态就是内置直连个人云：全新设备打开就是「贴授权串」那张表单，
+		// 而不是旧的外部 WebDAV 表单。
+		Backend:       "native",
+		CloudProvider: "139",
+		RemotePath:    "vault",
+		ChunkSize:     "500Mi",
+		Listen:        "127.0.0.1:0",
 	}
 }
 

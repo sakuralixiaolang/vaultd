@@ -7,6 +7,8 @@ const state = {
   configured: false,
   vaultReady: null,
   nativeFormOpen: false,
+  mode: null, // "native" | "webdav"，由 /api/status 决定初值
+  status: null,
   view: localStorage.getItem("vaultd.view") || "grid",
   sort: localStorage.getItem("vaultd.sort") || "name",
   filter: localStorage.getItem("vaultd.filter") || "all",
@@ -54,6 +56,12 @@ async function api(url, opts) {
 
 async function loadStatus() {
   const s = await api("/api/status");
+  state.status = s;
+  applyStatus(s);
+  return s;
+}
+
+function applyStatus(s) {
   state.configured = s.configured;
   state.vaultReady = !!s.vault_ready;
   $("keyfp").textContent = s.key_fingerprint ? "密钥 " + s.key_fingerprint + "…" : "";
@@ -61,23 +69,28 @@ async function loadStatus() {
   dot.className = "dot " + (s.vault_ready ? "ok" : s.configured ? "err" : "");
   $("setupPanel").classList.toggle("hidden", !!s.configured && !!s.vault_ready);
   if (s.vault_error) $("setupMsg").textContent = "连接失败：" + s.vault_error;
-  // 内置驱动模式下不再需要填 WebDAV，改成「贴授权串 / 导入密钥」的表单
-  const isNative = (s.backend || "").indexOf("内置") === 0;
-  $("setupTitle").textContent = isNative
-    ? "云端接入（" + s.backend + "）"
-    : "云端接入（本机 AList / OpenList 的 WebDAV）";
-  $("webdavForm").classList.toggle("hidden", isNative);
-  $("webdavHint").classList.toggle("hidden", isNative);
-  $("nativeNote").classList.toggle("hidden", !isNative);
-  const showNativeForm = isNative && (!s.configured || state.nativeFormOpen);
-  $("nativeForm").classList.toggle("hidden", !showNativeForm);
-  $("btnNativeToggle").classList.toggle("hidden", !(isNative && s.configured));
-  if (s.configured && !isNative) {
+
+  // 接入方式：全新设备（还没配置）默认就是内置直连；老的外部 WebDAV 配置则沿用 WebDAV。
+  // 用户可以在设置面板里手动切换，切换只影响表单展示，保存哪个表单就写哪种 backend。
+  const nativeOnServer = (s.backend || "").indexOf("内置") === 0;
+  if (!state.mode) {
+    state.mode = nativeOnServer || !s.configured ? "native" : "webdav";
+  }
+  const native = state.mode === "native";
+  $("btnModeNative").classList.toggle("on", native);
+  $("btnModeWebdav").classList.toggle("on", !native);
+  $("setupTitle").textContent = native ? "云端接入（内置直连）" : "云端接入（外部 WebDAV）";
+  $("webdavForm").classList.toggle("hidden", native);
+  $("webdavHint").classList.toggle("hidden", native);
+  $("nativeNote").classList.toggle("hidden", !native);
+  $("nativeForm").classList.toggle("hidden", !native);
+  $("btnNativeToggle").classList.add("hidden");
+
+  if (s.configured && !native) {
     $("fUrl").value = s.webdav_url || $("fUrl").value;
     $("fRemote").value = s.remote_path || "vault";
     $("fChunk").value = s.chunk_size || "500Mi";
   }
-  return s;
 }
 
 async function loadList() {
@@ -530,6 +543,15 @@ $("sortSel").addEventListener("change", (ev) => {
 $("btnNativeToggle").addEventListener("click", () => {
   state.nativeFormOpen = !state.nativeFormOpen;
   $("nativeForm").classList.toggle("hidden", !state.nativeFormOpen);
+});
+
+$("btnModeNative").addEventListener("click", () => {
+  state.mode = "native";
+  if (state.status) applyStatus(state.status);
+});
+$("btnModeWebdav").addEventListener("click", () => {
+  state.mode = "webdav";
+  if (state.status) applyStatus(state.status);
 });
 
 $("btnSaveCloud").addEventListener("click", async () => {

@@ -25,10 +25,14 @@
 
 <main>
   <section id="setupPanel" class="panel hidden">
-    <h2 id="setupTitle">云端接入（本机 AList / OpenList 的 WebDAV）</h2>
+    <h2 id="setupTitle">云端接入</h2>
+    <div class="seg mode-seg">
+      <button id="btnModeNative" class="tap">内置直连（139）</button>
+      <button id="btnModeWebdav" class="tap">外部 WebDAV</button>
+    </div>
     <p id="webdavHint" class="hint">目标存储必须开启「Web 代理 / WebDAV 本地代理」，否则 Range 不成立，视频无法拖动。</p>
-    <p id="nativeNote" class="hint hidden">当前是<b>内置驱动</b>：网关直接连云端，不需要任何外部 WebDAV 进程。
-      换账号或在新设备上首次接入，把 PC 端配置里的三样东西贴下面即可；密钥填成同一个，云端已有密文就能直接解开。</p>
+    <p id="nativeNote" class="hint hidden">内置驱动：网关直连云端，不需要外部 WebDAV 进程。授权串、主密钥、盐可从 PC 端
+      <code>%APPDATA%\EncryptedVault\config.json</code> 一次取全；<b>主密钥与盐留空＝新建一把钥匙</b>，打不开云端已有密文。</p>
     <div class="row"><button id="btnNativeToggle" class="ghost tap hidden">换账号 / 导入</button></div>
     <div id="nativeForm" class="hidden">
       <div class="grid">

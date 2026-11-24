@@ -194,6 +194,18 @@ gomobile bind -v -target $t -androidapi 24 -o android\app\libs\vaultd.aar .\mobi
 内置驱动形态下，手机**不需要**够到任何跑在别处的进程：网关、云盘客户端都在 App 进程内，
 App 私有目录的 `config.json` 里放 `backend=native` + `cloud_provider=139` + `cloud_authorization` 即可。
 
+新装 App 打开「设置」时，默认展示的就是内置直连表单（`backend` 默认 `native`），要填四样：
+
+| 字段 | 从哪来 | 说明 |
+|---|---|---|
+| 云端授权串 | PC 配置里的 `cloud_authorization` | 单会话语义：手机续期后 PC 旧串可能失效，反之亦然 |
+| 主密钥 | PC 配置里的 `master_key` | **必须与 PC 一致**，留空等于新生成一把钥匙，打不开已有密文 |
+| 盐 | PC 配置里的 `salt` | 与主密钥成对 |
+| 密文根目录 | 默认 `vault` | 与 PC 相同 |
+
+PC 端配置文件位置：Windows 为 `%APPDATA%\EncryptedVault\config.json`。保存后顶部指纹应与 PC 一致（8 位十六进制，例如 `A1B2C3D4`），
+列表里能看到 PC 传过的文件，才说明密钥对上了。接入方式随时可在设置面板里切到「外部 WebDAV」。
+
 只有回到旧形态（`backend` 为空、走外部 WebDAV）时，才需要让手机够到电脑上的 OpenList：
 
 1. **临时**：把 OpenList 的 `scheme.address` 从 `127.0.0.1` 改成 `0.0.0.0`（并在防火墙放行端口），App 内「接入设置」填电脑的局域网地址。注意这会把 OpenList 暴露到局域网。

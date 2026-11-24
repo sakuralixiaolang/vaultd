@@ -65,6 +65,9 @@ select { padding-right: 26px; }
 .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .seg button { border: none; border-radius: 0; background: transparent; padding: 8px 11px; min-height: 38px; }
 .seg button.on { background: rgba(20,184,166,.16); color: var(--accent); }
+.mode-seg { display: flex; width: 100%; margin: 0 0 12px; }
+.mode-seg button { flex: 1; font-size: 12px; }
+code { background: #0b1116; border: 1px solid var(--line); border-radius: 5px; padding: 0 4px; font-size: 11px; word-break: break-all; }
 
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 14px; }
 label { display: grid; gap: 6px; font-size: 12px; color: var(--muted); }
