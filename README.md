@@ -203,7 +203,19 @@ App 私有目录的 `config.json` 里放 `backend=native` + `cloud_provider=139`
 | 盐 | PC 配置里的 `salt` | 与主密钥成对 |
 | 密文根目录 | 默认 `vault` | 与 PC 相同 |
 
-PC 端配置文件位置：Windows 为 `%APPDATA%\EncryptedVault\config.json`。保存后顶部指纹应与 PC 一致（8 位十六进制，例如 `A1B2C3D4`），
+PC 端配置文件位置：Windows 为 `%APPDATA%\EncryptedVault\config.json`。
+#### 一键搬家：配置导出 / 导入（2026-11-24）
+
+手抄 64 位密钥不现实，所以设置面板里内置了搬运通道：
+
+1. 电脑端点「导出配置」，浏览器得到 `vaultd-config.json`（含 `cloud_authorization`、`master_key`、`salt`、根目录、分片大小）。
+2. 把这个文件发到手机（微信文件传输、139 邮箱、任意网盘都行）。
+3. 手机端「设置 → 内置直连 → 选择文件导入」，选中文件即自动填入并连接，顶部指纹应与电脑一致。
+   不方便传文件时，也可以把文件内容整段粘到「从文本导入」的框里。
+
+接口：`GET /api/config/export`（`Content-Disposition: attachment`）、`POST /api/config/import`（与 `/api/setup` 共用同一套校验与落盘逻辑）。
+导出文件**等于整库钥匙**，界面和文件里都写了「别发给别人、导入完就删」；服务端不提供任何后台自动导出。
+保存后顶部指纹应与 PC 一致（8 位十六进制，例如 `A1B2C3D4`），
 列表里能看到 PC 传过的文件，才说明密钥对上了。接入方式随时可在设置面板里切到「外部 WebDAV」。
 
 只有回到旧形态（`backend` 为空、走外部 WebDAV）时，才需要让手机够到电脑上的 OpenList：

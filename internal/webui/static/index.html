@@ -31,8 +31,8 @@
       <button id="btnModeWebdav" class="tap">外部 WebDAV</button>
     </div>
     <p id="webdavHint" class="hint">目标存储必须开启「Web 代理 / WebDAV 本地代理」，否则 Range 不成立，视频无法拖动。</p>
-    <p id="nativeNote" class="hint hidden">内置驱动：网关直连云端，不需要外部 WebDAV 进程。授权串、主密钥、盐可从 PC 端
-      <code>%APPDATA%\EncryptedVault\config.json</code> 一次取全；<b>主密钥与盐留空＝新建一把钥匙</b>，打不开云端已有密文。</p>
+    <p id="nativeNote" class="hint hidden">内置驱动：网关直连云端，不需要外部 WebDAV 进程。授权串、主密钥、盐可从 PC 端的
+      <code>%APPDATA%\EncryptedVault\</code> 目录里一次取全；<b>主密钥与盐留空＝新建一把钥匙</b>，打不开云端已有密文。</p>
     <div class="row"><button id="btnNativeToggle" class="ghost tap hidden">换账号 / 导入</button></div>
     <div id="nativeForm" class="hidden">
       <div class="grid">
@@ -45,6 +45,23 @@
       <div class="row">
         <button id="btnSaveCloud" class="primary tap">保存并连接</button>
         <span id="cloudMsg" class="muted"></span>
+      </div>
+
+      <div id="transferBox">
+        <p class="hint"><b>省掉手抄：</b>电脑端点「导出配置」得到一个 <code>vaultd-config.json</code>，
+          发到手机后在这里「选择文件导入」，一次把授权串、主密钥、盐全部搬过来。</p>
+        <div class="row wrap">
+          <a id="btnExportCfg" class="ghost tap" href="/api/config/export" download="vaultd-config.json">导出配置</a>
+          <button id="btnImportCfg" class="ghost tap">选择文件导入</button>
+          <button id="btnExportText" class="ghost tap">导出为文本</button>
+        </div>
+        <input id="cfgFile" type="file" accept=".json,application/json,text/plain" hidden>
+        <textarea id="cfgText" rows="3" placeholder="或把导出文件的整段内容粘贴到这里"></textarea>
+        <div class="row">
+          <button id="btnImportText" class="ghost tap">从文本导入</button>
+          <span id="xferMsg" class="muted"></span>
+        </div>
+        <p class="hint">导出文件里含主密钥，等于整库钥匙：别发给别人，导入完就删掉。</p>
       </div>
     </div>
     <div id="webdavForm">

@@ -34,10 +34,10 @@ type Server struct {
 	cfg   *localcfg.Config
 	token string
 
-	mu         sync.RWMutex
-	v          *vault.Vault
-	vErr       error
-	lastRetry  time.Time
+	mu        sync.RWMutex
+	v         *vault.Vault
+	vErr      error
+	lastRetry time.Time
 }
 
 func New(cfg *localcfg.Config, token string) *Server {
@@ -95,6 +95,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/thumb", s.guard(s.handleThumb))
 	mux.HandleFunc("/api/setup", s.guard(s.handleSetup))
 	mux.HandleFunc("/api/delete", s.guard(s.handleDelete))
+	mux.HandleFunc("/api/config/export", s.guard(s.handleConfigExport))
+	mux.HandleFunc("/api/config/import", s.guard(s.handleConfigImport))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 	return withLog(mux)
 }
@@ -336,25 +338,32 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	resp, err := s.applySetup(r.Context(), req)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, resp)
+}
 
+// applySetup 校验并落地一份接入配置，然后重建密文库连接。
+// /api/setup 与 /api/config/import 共用这一段，避免两条写配置的路径行为不一致。
+func (s *Server) applySetup(ctx context.Context, req setupReq) (map[string]any, error) {
 	// 密钥导入：只接受成对出现、形状正确的 32 字节 hex。
 	// 这一步会改变“能不能解开云端已有密文”，所以宁可不写也不写错一半。
 	if req.MasterKey != "" || req.Salt != "" {
 		if !localcfg.ValidKeyHex(req.MasterKey) || !localcfg.ValidKeyHex(req.Salt) {
-			writeErr(w, errors.New("主密钥与盐必须同时提供，且各是 64 位 hex（32 字节）"))
-			return
+			return nil, errors.New("主密钥与盐必须同时提供，且各是 64 位 hex（32 字节）")
 		}
 		s.cfg.MasterKey, s.cfg.Salt = req.MasterKey, req.Salt
 	}
 
 	if req.Backend == "native" {
 		if req.CloudProvider != "" && req.CloudProvider != "139" {
-			writeErr(w, fmt.Errorf("暂不支持的云盘类型: %s", req.CloudProvider))
-			return
+			return nil, fmt.Errorf("暂不支持的云盘类型: %s", req.CloudProvider)
 		}
 		if err := cloud139.CheckAuthorization(req.CloudAuth); err != nil {
-			writeErr(w, fmt.Errorf("授权串不可用: %w", err))
-			return
+			return nil, fmt.Errorf("授权串不可用: %w", err)
 		}
 		s.cfg.Backend = "native"
 		s.cfg.CloudProvider = "139"
@@ -362,12 +371,10 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		s.cfg.WebDAVURL, s.cfg.WebDAVUser, s.cfg.WebDAVPass = "", "", ""
 	} else {
 		if req.URL == "" || req.User == "" {
-			writeErr(w, errors.New("WebDAV 地址与用户名必填"))
-			return
+			return nil, errors.New("WebDAV 地址与用户名必填")
 		}
 		if !strings.HasPrefix(req.URL, "http://") && !strings.HasPrefix(req.URL, "https://") {
-			writeErr(w, errors.New("WebDAV 地址必须是 http(s) 开头"))
-			return
+			return nil, errors.New("WebDAV 地址必须是 http(s) 开头")
 		}
 		s.cfg.Backend = ""
 		s.cfg.CloudAuth = ""
@@ -376,24 +383,28 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		s.cfg.WebDAVPass = req.Pass
 	}
 	if req.RemotePath != "" {
+		if err := localcfg.ValidRemotePath(req.RemotePath); err != nil {
+			return nil, err
+		}
 		s.cfg.RemotePath = strings.Trim(req.RemotePath, "/")
 	}
 	if req.ChunkSize != "" {
+		if err := localcfg.ValidChunkSize(req.ChunkSize); err != nil {
+			return nil, err
+		}
 		s.cfg.ChunkSize = req.ChunkSize
 	}
 	if err := s.cfg.Save(); err != nil {
-		writeErr(w, err)
-		return
+		return nil, err
 	}
-	s.reload(r.Context())
+	s.reload(ctx)
 	s.mu.RLock()
 	vErr := s.vErr
 	s.mu.RUnlock()
 	if vErr != nil {
-		writeErr(w, fmt.Errorf("配置已保存，但连接失败: %w", vErr))
-		return
+		return nil, fmt.Errorf("配置已保存，但连接失败: %w", vErr)
 	}
-	writeJSON(w, map[string]any{"ok": true, "fingerprint": s.cfg.Fingerprint(), "backend": s.cfg.BackendName()})
+	return map[string]any{"ok": true, "fingerprint": s.cfg.Fingerprint(), "backend": s.cfg.BackendName()}, nil
 }
 
 func (s *Server) needVault() (*vault.Vault, error) {

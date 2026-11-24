@@ -554,7 +554,7 @@ $("btnModeWebdav").addEventListener("click", () => {
   if (state.status) applyStatus(state.status);
 });
 
-$("btnSaveCloud").addEventListener("click", async () => {
+async function saveNative() {
   const payload = {
     backend: "native",
     cloud_provider: "139",
@@ -573,7 +573,6 @@ $("btnSaveCloud").addEventListener("click", async () => {
     });
     $("cloudMsg").textContent = "";
     $("fAuth").value = "";
-    state.nativeFormOpen = false;
     await loadStatus();
     await loadList();
     toast("已连接云端", "ok");
@@ -581,7 +580,116 @@ $("btnSaveCloud").addEventListener("click", async () => {
   } catch (err) {
     $("cloudMsg").textContent = "失败：" + err.message;
     toast("接入失败：" + err.message);
+    throw err;
   }
+}
+
+$("btnSaveCloud").addEventListener("click", () => { saveNative().catch(() => {}); });
+
+// ---- 配置导入：把 PC 导出的 vaultd-config.json 搬到这台设备 ----
+const KEY_RE = /^[0-9a-f]{64}$/i;
+
+function fillFromDoc(doc) {
+  const auth = (doc.cloud_authorization || "").trim();
+  const key = (doc.master_key || "").trim();
+  const salt = (doc.salt || "").trim();
+  if (key || salt) {
+    if (!KEY_RE.test(key) || !KEY_RE.test(salt)) {
+      throw new Error("主密钥与盐必须同时提供，且各是 64 位 hex");
+    }
+  }
+  if (!auth && !doc.webdav_url) throw new Error("文件里既没有云端授权串，也没有 WebDAV 地址");
+  const webdav = (doc.backend || "") === "webdav" || (!auth && doc.webdav_url);
+  if (webdav) {
+    state.mode = "webdav";
+    if (state.status) applyStatus(state.status);
+    $("fUrl").value = doc.webdav_url || "";
+    $("fUser").value = doc.webdav_user || "";
+    $("fPass").value = doc.webdav_pass || "";
+    $("fRemote").value = doc.remote_path || "vault";
+    $("fChunk").value = doc.chunk_size || "500Mi";
+    // WebDAV 表单里没有密钥字段，导入时先把密钥挂在状态上，保存时一并提交，
+    // 否则从新设备导进来还是新生成的那把钥匙，云端旧密文照样解不开。
+    state.xferKeys = key && salt ? { master_key: key, salt: salt } : null;
+    return "webdav";
+  }
+  state.mode = "native";
+  if (state.status) applyStatus(state.status);
+  $("fAuth").value = auth;
+  $("fKey").value = key;
+  $("fSalt").value = salt;
+  $("fRemoteN").value = doc.remote_path || "vault";
+  $("fChunkN").value = doc.chunk_size || "500Mi";
+  state.xferKeys = null;
+  return "native";
+}
+
+async function importConfigText(text, label) {
+  $("xferMsg").textContent = "解析中…";
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch (e) {
+    $("xferMsg").textContent = "不是 JSON：" + e.message;
+    return;
+  }
+  if (doc && doc.type && doc.type !== "vaultd-config") {
+    $("xferMsg").textContent = "不是 vaultd 导出的配置文件";
+    return;
+  }
+  let kind;
+  try {
+    kind = fillFromDoc(doc || {});
+  } catch (e) {
+    $("xferMsg").textContent = "导入失败：" + e.message;
+    return;
+  }
+  if (kind === "webdav") {
+    $("xferMsg").textContent = "已填入 WebDAV 表单" + (label ? "（" + label + "）" : "");
+    $("btnSave").click();
+    return;
+  }
+  $("xferMsg").textContent = "已导入" + (label ? "（" + label + "）" : "") + "，正在连接…";
+  try {
+    await saveNative();
+    $("xferMsg").textContent = "已导入并连接云端";
+    $("cfgText").value = "";
+  } catch (e) {
+    $("xferMsg").textContent = "已写入，但连接失败：" + e.message;
+  }
+}
+
+$("btnImportCfg").addEventListener("click", () => $("cfgFile").click());
+
+// 手机上「导出」的兜底：有些 WebView 不会把下载交给系统下载器，
+// 这里直接把 JSON 铺进文本框，长按全选复制即可传到别的设备。
+$("btnExportText").addEventListener("click", async () => {
+  $("xferMsg").textContent = "读取中…";
+  try {
+    const r = await fetch("/api/config/export", { credentials: "same-origin" });
+    const t = await r.text();
+    if (!r.ok) throw new Error((JSON.parse(t) || {}).message || ("HTTP " + r.status));
+    $("cfgText").value = t.trim();
+    $("xferMsg").textContent = "已填入下方文本框，长按全选复制";
+  } catch (e) {
+    $("xferMsg").textContent = "导出失败：" + e.message;
+  }
+});
+
+$("cfgFile").addEventListener("change", () => {
+  const f = $("cfgFile").files && $("cfgFile").files[0];
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => importConfigText(String(rd.result || ""), f.name);
+  rd.onerror = () => { $("xferMsg").textContent = "读不到这个文件"; };
+  rd.readAsText(f);
+  $("cfgFile").value = "";
+});
+
+$("btnImportText").addEventListener("click", () => {
+  const t = $("cfgText").value.trim();
+  if (!t) { $("xferMsg").textContent = "先把文件内容粘进来"; return; }
+  importConfigText(t, "");
 });
 
 $("btnSave").addEventListener("click", async () => {
@@ -591,6 +699,7 @@ $("btnSave").addEventListener("click", async () => {
     pass: $("fPass").value,
     remote_path: $("fRemote").value.trim() || "vault",
     chunk_size: $("fChunk").value.trim() || "500Mi",
+    ...(state.xferKeys || {}),
   };
   $("setupMsg").textContent = "连接中…";
   try {
@@ -600,6 +709,7 @@ $("btnSave").addEventListener("click", async () => {
       body: JSON.stringify(payload),
     });
     $("setupMsg").textContent = "";
+    state.xferKeys = null;
     await loadStatus();
     await loadList();
     toast("已连接 WebDAV", "ok");

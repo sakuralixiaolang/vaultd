@@ -175,3 +175,44 @@ func validHex(s string, bytes int) bool {
 	_, err := hex.DecodeString(s)
 	return err == nil
 }
+
+// ValidRemotePath 校验密文根目录：不允许空、绝对路径、上跳与反斜杠，
+// 因为这一段会直接拼进 rclone 的 remote 路径，写错了会把东西丢到根上。
+func ValidRemotePath(p string) error {
+	p = strings.Trim(p, "/")
+	if p == "" {
+		return errors.New("密文根目录不能为空")
+	}
+	if strings.Contains(p, "..") || strings.Contains(p, `\`) {
+		return errors.New("密文根目录不能包含 .. 或反斜杠")
+	}
+	for _, part := range strings.Split(p, "/") {
+		if part == "" {
+			return errors.New("密文根目录里出现了空层级")
+		}
+	}
+	return nil
+}
+
+// ValidChunkSize 校验 rclone chunker 的分片大小写法（如 500Mi、32Mi、1Gi）。
+func ValidChunkSize(s string) error {
+	if s == "" {
+		return errors.New("分片大小不能为空")
+	}
+	num, unit := s, ""
+	for i, c := range s {
+		if c < '0' || c > '9' {
+			num, unit = s[:i], s[i:]
+			break
+		}
+	}
+	if num == "" {
+		return errors.New("分片大小必须以数字开头")
+	}
+	switch unit {
+	case "", "K", "M", "G", "T", "Ki", "Mi", "Gi", "Ti":
+	default:
+		return fmt.Errorf("不认识的分片单位: %s", unit)
+	}
+	return nil
+}
