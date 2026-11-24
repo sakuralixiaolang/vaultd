@@ -4,17 +4,18 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0f1419">
-<title>密文相册</title>
+<title>我的网盘</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <header>
   <div class="brand">
     <span class="dot" id="health"></span>
-    <strong>密文相册</strong>
+    <strong>我的网盘</strong>
     <span class="muted" id="keyfp"></span>
   </div>
   <nav>
+    <button id="btnTheme" class="ghost tap" title="切换深浅色">◐</button>
     <button id="btnSetup" class="ghost tap">设置</button>
   </nav>
 </header>
@@ -84,6 +85,13 @@
       <input id="fileInput" type="file" multiple hidden>
       <button id="pickFile" class="primary tap">＋ 上传文件</button>
       <p class="hint drop-hint">照片、视频、文档、压缩包……任意文件都能传，上传前在本机完成加密。</p>
+      <div id="upTarget" class="up-target">
+        <span class="muted">上传到</span>
+        <select id="upFolder" class="tap" title="选择目标文件夹"></select>
+        <span id="newFolderWrap" class="hidden">
+          <input id="newFolderName" placeholder="新文件夹名，如 2026-11" autocomplete="off">
+        </span>
+      </div>
       <div id="queue"></div>
     </div>
   </section>
@@ -101,6 +109,7 @@
           <button id="btnGrid" data-mode="grid" class="tap" title="网格">▦</button>
           <button id="btnList" data-mode="list" class="tap" title="列表">☰</button>
         </div>
+        <button id="btnMkdir" class="ghost tap" title="新建文件夹">＋文件夹</button>
         <button id="btnUp" class="ghost tap" disabled>↑</button>
         <button id="btnRefresh" class="ghost tap" title="刷新">⟳</button>
       </div>
@@ -129,3 +138,4 @@
 <script src="/app.js"></script>
 </body>
 </html>
+

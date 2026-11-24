@@ -8,6 +8,7 @@ package vault
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -182,6 +183,16 @@ func (v *Vault) List(ctx context.Context, dir string) ([]Entry, error) {
 }
 
 // Stat 返回对象（用于取真实解密后的大小）。
+// Mkdir 建目录（父目录必须已存在）。手机上按文件夹上传时先走这一步，
+// 这样传完当前目录里多出来的是「文件夹」，而不是一堆散文件。
+func (v *Vault) Mkdir(ctx context.Context, remote string) error {
+	remote = cleanRel(remote)
+	if remote == "" {
+		return errors.New("目录名不能为空")
+	}
+	return v.f.Mkdir(ctx, remote)
+}
+
 func (v *Vault) Stat(ctx context.Context, remote string) (fs.Object, error) {
 	return v.f.NewObject(ctx, cleanRel(remote))
 }
@@ -190,7 +201,9 @@ func (v *Vault) Stat(ctx context.Context, remote string) (fs.Object, error) {
 // 分片内重传由上层决定，这里只做一次写入。
 func (v *Vault) Upload(ctx context.Context, remote string, r io.Reader, size int64) error {
 	remote = cleanRel(remote)
-	info := object.NewStaticObjectInfo(path.Base(remote), time.Now(), size, true, nil, v.f)
+	// 名字必须带上完整相对路径：Fs.Put 是按 info.Name() 落盘的，
+	// 只给 Base 会把所有上传都丢到根目录（子目录名被吃掉）。
+	info := object.NewStaticObjectInfo(remote, time.Now(), size, true, nil, v.f)
 	_, err := v.f.Put(ctx, r, info)
 	return err
 }
@@ -223,6 +236,61 @@ func (v *Vault) Remove(ctx context.Context, remote string) error {
 	return o.Remove(ctx)
 }
 
+// Delete 删除文件或目录：先按文件取对象；取不到再试目录。
+// 不同后端对「拿目录当对象」的报错不一致（ErrorIsDir / object not found），
+// 所以统一用 List 判定目录（空目录也能 List 成功），判定不了再交给 Remove 报错。
+func (v *Vault) Delete(ctx context.Context, remote string) error {
+	remote = cleanRel(remote)
+	if remote == "" {
+		return errors.New("不能删除根目录")
+	}
+	if _, err := v.f.NewObject(ctx, remote); err == nil {
+		return v.Remove(ctx, remote)
+	}
+	if _, err := v.f.List(ctx, remote); err == nil {
+		return v.rmTree(ctx, remote, 0)
+	}
+	return v.Remove(ctx, remote)
+}
+
+// rmTree 递归清空目录再删掉它：WebDAV 不支持「递归删除目录」，
+// 留着子文件会直接报 directory not empty。
+func (v *Vault) rmTree(ctx context.Context, dir string, depth int) error {
+	if depth > 8 {
+		return errors.New("目录层级过深，已停止删除")
+	}
+	entries, err := v.f.List(ctx, dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		rel := path.Join(dir, path.Base(e.Remote()))
+		if o, err := v.f.NewObject(ctx, rel); err == nil {
+			if err := o.Remove(ctx); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := v.rmTree(ctx, rel, depth+1); err != nil {
+			return err
+		}
+	}
+	// 139 云的目录列表有秒级最终一致性：刚删完子项的目录立刻 Rmdir 可能报
+	// directory not empty，这里小退避重试几次。
+	var err2 error
+	for i := 0; i < 4; i++ {
+		if err2 = v.f.Rmdir(ctx, dir); err2 == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(1200*(i+1)) * time.Millisecond):
+		}
+	}
+	return err2
+}
+
 // cleanRel 归一化为安全的相对路径，禁止路径逃逸。
 func cleanRel(p string) string {
 	p = strings.ReplaceAll(p, "\\", "/")
@@ -231,3 +299,4 @@ func cleanRel(p string) string {
 	cleaned := path.Clean("/" + p)
 	return strings.TrimPrefix(cleaned, "/")
 }
+

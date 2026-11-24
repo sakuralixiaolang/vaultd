@@ -8,7 +8,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <application
-        android:label="密文相册"
+        android:label="我的网盘"
         android:usesCleartextTraffic="true"
         android:extractNativeLibs="true"
         android:debuggable="true"
@@ -27,3 +27,4 @@
         </activity>
     </application>
 </manifest>
+

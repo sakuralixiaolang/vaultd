@@ -95,6 +95,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/thumb", s.guard(s.handleThumb))
 	mux.HandleFunc("/api/setup", s.guard(s.handleSetup))
 	mux.HandleFunc("/api/delete", s.guard(s.handleDelete))
+	mux.HandleFunc("/api/mkdir", s.guard(s.handleMkdir))
 	mux.HandleFunc("/api/config/export", s.guard(s.handleConfigExport))
 	mux.HandleFunc("/api/config/import", s.guard(s.handleConfigImport))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
@@ -304,15 +305,42 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	if err := v.Remove(ctx, r.URL.Query().Get("path")); err != nil {
+	// 目录和普通文件走同一个删除入口：Vault.Delete 自己判断是文件还是目录，
+	// 手机上文件夹格子上的 × 按钮点下来就是这条路径。
+	if err := v.Delete(ctx, r.URL.Query().Get("path")); err != nil {
 		writeErr(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
 
+// handleMkdir 新建子目录。手机上「按文件夹上传」就是先建目录再把文件传进去，
+// 这样当前目录里只多出一个文件夹，不会散落一堆文件。
+func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	v, err := s.needVault()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	p := strings.Trim(r.URL.Query().Get("path"), "/")
+	if p == "" {
+		writeErr(w, errors.New("目录名不能为空"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	if err := v.Mkdir(ctx, p); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "path": "/" + p})
+}
+
 type setupReq struct {
-	// 内置直连（native）用到的字段
 	Backend       string `json:"backend"`
 	CloudProvider string `json:"cloud_provider"`
 	CloudAuth     string `json:"cloud_authorization"`
@@ -590,3 +618,4 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 func Listen(addr string) (net.Listener, error) {
 	return net.Listen("tcp", addr)
 }
+

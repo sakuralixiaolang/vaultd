@@ -16,6 +16,23 @@ const state = {
 };
 const $ = (id) => document.getElementById(id);
 
+// ---------- 主题：默认跟随系统，手动切过就记住 ----------
+const THEME_KEY = "vaultd.theme";
+function systemTheme() {
+  return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+}
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = t === "light" ? "#f2f5f8" : "#0f1419";
+  const btn = $("btnTheme");
+  if (btn) {
+    btn.textContent = t === "light" ? "☾" : "☀";
+    btn.title = t === "light" ? "切到深色" : "切到浅色";
+  }
+}
+applyTheme(localStorage.getItem(THEME_KEY) || systemTheme());
+
 const fmtSize = (n) => {
   if (n < 1024) return n + " B";
   const u = ["KB", "MB", "GB", "TB"];
@@ -101,6 +118,7 @@ async function loadList() {
   const dirs = state.entries.filter((e) => e.dir).length;
   const files = state.entries.length - dirs;
   $("count").textContent = state.entries.length ? `${dirs} 目录 · ${files} 文件` : "";
+  refreshTargetOptions();
   renderList();
   // 列表既然拉到了，说明后台自己连上了；把状态与错误面板同步过来，
   // 否则手机开机网络晚到时会一直挂着「连接失败」的提示。
@@ -113,6 +131,33 @@ async function loadList() {
 function showPath(p) {
   $("pathbar").textContent = p === "/" ? "根目录 /" : p;
   $("pathbar").title = p;
+}
+
+// 「上传到」下拉：当前目录 + 当前目录下的子文件夹 + 新建文件夹。
+// 选新建时才露出输入框，避免平时多占一行。
+function refreshTargetOptions() {
+  const sel = $("upFolder");
+  if (!sel) return;
+  const keep = sel.value;
+  const dirs = state.entries.filter((e) => e.dir).map((e) => e.name);
+  const cur = state.cwd ? "/" + state.cwd : "根目录";
+  sel.innerHTML = `<option value="">当前目录（${escapeHtml(cur)}）</option>` +
+    dirs.map((d) => `<option value="${escapeHtml(d)}">${escapeHtml(d)}/</option>`).join("") +
+    `<option value="__new__">＋ 新建文件夹…</option>`;
+  if ([...sel.options].some((o) => o.value === keep)) sel.value = keep;
+  syncNewFolderUI();
+}
+
+function syncNewFolderUI() {
+  const sel = $("upFolder");
+  const wrap = $("newFolderWrap");
+  if (!sel || !wrap) return;
+  const isNew = sel.value === "__new__";
+  wrap.classList.toggle("hidden", !isNew);
+  if (isNew && !$("newFolderName").value) {
+    const d = new Date();
+    $("newFolderName").value = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
 }
 
 function sortedEntries() {
@@ -134,6 +179,7 @@ function renderList() {
   const box = $("list");
   box.className = "album" + (state.view === "list" ? " list-mode" : "");
   box.innerHTML = "";
+  vidThumbBudget = 24; // 每次重绘重置：视频抽帧有网络+解码成本，超量只留图标
   $("btnGrid").classList.toggle("on", state.view === "grid");
   $("btnList").classList.toggle("on", state.view === "list");
   renderFilters();
@@ -231,6 +277,70 @@ function fallbackGlyph(name) {
   return kindGlyph(name);
 }
 
+// 视频缩略图：让 WebView 自己解码出一帧。网关支持 Range，只读前面一小段，
+// 不会为了一个格子把整段视频拉下来。
+// 注意：不能只 seek 后直接丢进格子——部分 WebView（尤其软件渲染）只解码不合成，
+// 屏幕上会留一块黑；所以这里用「静音自动播放 → 拿到一帧立刻暂停 → 画进 canvas」，
+// 画出来的像素是确定的。
+let vidThumbBudget = 24;
+function attachVideoThumb(host, e, cls) {
+  if (!host || vidThumbBudget <= 0) return;
+  vidThumbBudget--;
+  const v = document.createElement("video");
+  v.className = cls;
+  v.muted = true;
+  v.playsInline = true;
+  v.setAttribute("muted", "");
+  v.setAttribute("playsinline", "");
+  v.setAttribute("webkit-playsinline", "");
+  v.preload = "auto";
+  v.src = streamURL(e) + "#t=0.6";
+
+  let done = false;
+  let hard = 0;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    clearTimeout(hard);
+    const side = Math.min(v.videoWidth || 0, v.videoHeight || 0);
+    if (side && v.readyState >= 2) {
+      const size = cls === "row-vid" ? 120 : 320;
+      const c = document.createElement("canvas");
+      c.width = c.height = size;
+      c.className = cls;
+      try {
+        c.getContext("2d").drawImage(v, (v.videoWidth - side) / 2, (v.videoHeight - side) / 2, side, side, 0, 0, size, size);
+        host.classList.add("filled");
+        host.prepend(c);
+      } catch (_) { /* 抽帧失败就保留原来的图标 */ }
+    }
+    try { v.pause(); } catch (_) {}
+    v.removeAttribute("src");
+    try { v.load(); } catch (_) {}
+    v.remove(); // 解码器立刻放掉，一屏几十个视频不会一直占内存
+  };
+
+  const grab = () => {
+    try { v.play().catch(finish); } catch (_) { return finish(); }
+    if (v.requestVideoFrameCallback) v.requestVideoFrameCallback(finish);
+    else setTimeout(finish, 400);
+    setTimeout(finish, 3000); // 兜底：拿不到帧就退回图标，别留一块黑
+  };
+
+  v.addEventListener("loadedmetadata", () => {
+    try {
+      const t = Math.min(1.2, (v.duration && isFinite(v.duration) ? v.duration : 2) / 3);
+      v.currentTime = Math.max(0.2, t);
+    } catch (_) { /* 有的格式不给 seek，就从头播一帧 */ }
+  });
+  v.addEventListener("loadeddata", grab, { once: true });
+  v.addEventListener("error", finish);
+  // loadeddata 有时候干脆不来（弱网/解码器忙），留个硬超时兜底，
+  // 免得格子里一直挂着一个不放的 video 元素。
+  hard = setTimeout(finish, 9000);
+  host.prepend(v);
+}
+
 function tileEl(e) {
   const el = document.createElement("div");
   el.className = "tile";
@@ -262,6 +372,8 @@ function tileEl(e) {
     };
     img.onerror = () => {};
     img.src = thumbURL(e, 400);
+  } else if (isVideo(e.name)) {
+    attachVideoThumb(el.querySelector(".tile-ph"), e, "tile-vid");
   }
   el.addEventListener("click", (ev) => {
     if (ev.target.classList.contains("kill")) return;
@@ -284,6 +396,7 @@ function rowEl(e) {
     <button class="del ghost" title="删除">✕</button>`;
   const img = el.querySelector(".thumb img");
   if (img) img.addEventListener("error", () => { el.querySelector(".thumb").textContent = fallbackGlyph(e.name); });
+  if (!e.dir && isVideo(e.name)) attachVideoThumb(el.querySelector(".thumb"), e, "row-vid");
   el.addEventListener("click", (ev) => {
     if (ev.target.classList.contains("del")) return;
     e.dir ? openDir(e.name) : openViewer(e);
@@ -801,10 +914,54 @@ function queueItem(file, dir) {
 
 async function uploadFiles(files) {
   if (!files.length) return;
-  const dir = state.cwd; // 上传过程中翻目录也不会传错地方
+  let dir;
+  try {
+    dir = await resolveUploadDir();
+  } catch (e) {
+    toast("上传目标无效：" + e.message);
+    return;
+  }
   for (const f of files) await queueItem(f, dir);
+  if ($("upFolder").value === "__new__") {
+    $("newFolderName").value = "";
+    $("upFolder").value = "";
+    syncNewFolderUI();
+  }
   await loadList();
 }
+
+async function resolveUploadDir() {
+  const sel = $("upFolder") ? $("upFolder").value : "";
+  if (sel === "__new__") {
+    const name = $("newFolderName").value.trim();
+    if (!name) throw new Error("先填新文件夹名");
+    if (name.includes("/") || name.includes("\\")) throw new Error("文件夹名不能带斜杠");
+    const p = joinPath(state.cwd, name).replace(/^\//, "");
+    await api("/api/mkdir?path=" + encodeURIComponent(p), { method: "POST" });
+    return p;
+  }
+  return sel ? joinPath(state.cwd, sel).replace(/^\//, "") : state.cwd;
+}
+
+$("btnMkdir").addEventListener("click", async () => {
+  const name = prompt("新建文件夹（在当前目录下）");
+  if (!name || !name.trim()) return;
+  try {
+    const p = joinPath(state.cwd, name.trim()).replace(/^\//, "");
+    await api("/api/mkdir?path=" + encodeURIComponent(p), { method: "POST" });
+    toast("已创建 " + name.trim(), "ok");
+    await loadList();
+  } catch (err) {
+    toast("创建失败：" + err.message);
+  }
+});
+
+$("upFolder").addEventListener("change", syncNewFolderUI);
+$("btnTheme").addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  localStorage.setItem(THEME_KEY, next);
+  applyTheme(next);
+});
 
 $("pickFile").addEventListener("click", (ev) => { ev.preventDefault(); $("fileInput").click(); });
 $("fileInput").addEventListener("change", (ev) => {
@@ -837,8 +994,21 @@ window.vaultdBack = () => {
 (async function boot() {
   try {
     await loadStatus();
-    if (state.configured) await loadList();
   } catch (e) {
     console.error(e);
   }
+  if (!state.configured) return;
+  // 手机开机后 DNS/网络常常比 App 晚到手，首次列表很容易失败。
+  // 这里自带退避重试，免得用户对着空白的媒体库以为坏了。
+  for (let i = 0; i < 5; i++) {
+    try {
+      await loadList();
+      return;
+    } catch (e) {
+      console.error(e);
+      if (i === 4) toast("列表加载失败：" + e.message);
+      await new Promise((r) => setTimeout(r, 1200 * (i + 1)));
+    }
+  }
 })();
+
