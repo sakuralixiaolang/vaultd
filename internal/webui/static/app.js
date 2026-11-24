@@ -580,6 +580,9 @@ async function saveNative() {
   } catch (err) {
     $("cloudMsg").textContent = "失败：" + err.message;
     toast("接入失败：" + err.message);
+    // 服务端是「先落盘再连接」，所以失败时配置其实已经写进去了。
+    // 这里补一次状态刷新，否则顶部指纹还停在导入前那把新钥匙，看着像密钥没搬过来。
+    try { await loadStatus(); } catch (_) {}
     throw err;
   }
 }
@@ -716,6 +719,8 @@ $("btnSave").addEventListener("click", async () => {
   } catch (err) {
     $("setupMsg").textContent = "失败：" + err.message;
     toast("接入失败：" + err.message);
+    state.xferKeys = null; // 配置已写进服务端，密钥不再挂在状态上，避免下次重复提交
+    try { await loadStatus(); } catch (_) {}
   }
 });
 
