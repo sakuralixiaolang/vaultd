@@ -21,9 +21,11 @@ import java.net.URLEncoder;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -44,6 +46,7 @@ public final class AutoSync {
     private static final class Item {
         Uri uri;
         String name;
+        String album;
         long size;
         long mtime;
     }
@@ -66,20 +69,28 @@ public final class AutoSync {
             return r;
         }
         String dir = SyncPrefs.dir(ctx);
+        boolean keepAlbum = SyncPrefs.keepAlbum(ctx);
         try {
-            ensureDir(base, token, dir);
-            Set<String> have = remoteNames(base, token, dir);
+            Map<String, Set<String>> remote = new HashMap<>();
             List<Item> items = scan(ctx);
             for (Item it : items) {
-                if (have.contains(it.name)) {
+                // 云端按「相册名」分子文件夹，保留手机上原来的相册结构。
+                String folder = keepAlbum ? join(dir, it.album) : dir;
+                Set<String> names = remote.get(folder);
+                if (names == null) {
+                    ensureDir(base, token, folder);
+                    names = remoteNames(base, token, folder);
+                    remote.put(folder, names);
+                }
+                if (!names.add(it.name)) {
                     r.skipped++;
                     continue;
                 }
                 try {
-                    upload(base, token, dir, it, ctx);
-                    have.add(it.name);
+                    upload(base, token, folder, it, ctx);
                     r.uploaded++;
                 } catch (Exception e) {
+                    names.remove(it.name); // 失败了下一轮还得重试
                     r.failed++;
                     r.msg = it.name + " 失败：" + e.getMessage();
                 }
@@ -119,6 +130,7 @@ public final class AutoSync {
     private static List<Item> scan(Context ctx) {
         List<Item> out = new ArrayList<>();
         Set<String> seen = new HashSet<>();
+        Set<String> picked = selectedAlbums(ctx);
         long since = SyncPrefs.lastScanMark(ctx);
         if (since > 0) since -= 3L * 3600_000L; // 回看 3 小时，防止刚好卡在边界
         String[] proj = {
@@ -126,6 +138,8 @@ public final class AutoSync {
                 MediaStore.MediaColumns.DISPLAY_NAME,
                 MediaStore.MediaColumns.SIZE,
                 MediaStore.MediaColumns.DATE_MODIFIED,
+                "bucket_display_name",
+                "bucket_id",
         };
         String[] tables = {"images", "video"};
         for (String t : tables) {
@@ -156,17 +170,28 @@ public final class AutoSync {
                 int nameI = c.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME);
                 int sizeI = c.getColumnIndex(MediaStore.MediaColumns.SIZE);
                 int mtI = c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED);
+                int bkI = c.getColumnIndex("bucket_display_name");
+                int bkIdI = c.getColumnIndex("bucket_id");
                 while (c.moveToNext() && out.size() < 300) {
                     String name = nameI >= 0 ? c.getString(nameI) : null;
                     if (name == null || name.isEmpty()) continue;
+                    String album = "";
+                    if (bkI >= 0) album = c.getString(bkI);
+                    if (album == null || album.trim().isEmpty()) {
+                        album = bkIdI >= 0 ? ("相册" + c.getString(bkIdI)) : "其他";
+                    }
+                    album = safeName(album);
+                    // 用户勾了具体相册就只备份这些；没勾（空）表示全部相册。
+                    if (!picked.isEmpty() && !picked.contains(album)) continue;
                     long size = sizeI >= 0 ? c.getLong(sizeI) : 0;
                     if (size <= 0) continue;
                     long mt = mtI >= 0 ? c.getLong(mtI) : 0;
                     long id = idI >= 0 ? c.getLong(idI) : 0;
-                    if (!seen.add(name)) continue;
+                    if (!seen.add(album + "/" + name)) continue;
                     Item it = new Item();
                     it.uri = ContentUris.withAppendedId(table, id);
                     it.name = name;
+                    it.album = album;
                     it.size = size;
                     it.mtime = mt > 0 ? mt : System.currentTimeMillis() / 1000L;
                     out.add(it);
@@ -178,6 +203,83 @@ public final class AutoSync {
             }
         }
         return out;
+    }
+
+    /** 相册名当文件夹用，把路径分隔符之类的不合法字符洗掉。 */
+    private static String safeName(String s) {
+        if (s == null) return "其他";
+        String v = s.replace('/', '_').replace('\\', '_').replace(':', '_').trim();
+        if (v.isEmpty() || v.equals(".") || v.equals("..")) return "其他";
+        if (v.length() > 60) v = v.substring(0, 60);
+        return v;
+    }
+
+    private static String join(String base, String sub) {
+        if (sub == null || sub.trim().isEmpty()) return base;
+        if (!base.endsWith("/")) base += "/";
+        return base + sub;
+    }
+
+    /** 系统相册清单：给设置面板勾选用；count 是该相册里的图片+视频数量。 */
+    public static String albumsJson(Context ctx) {
+        Map<String, Integer> count = new HashMap<>();
+        String[] tables = {"images", "video"};
+        for (String t : tables) {
+            Uri table = "images".equals(t)
+                    ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                    : MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
+            Cursor c = null;
+            try {
+                c = ctx.getContentResolver().query(table,
+                        new String[]{"bucket_display_name", "bucket_id", MediaStore.MediaColumns.SIZE},
+                        null, null, MediaStore.MediaColumns.DATE_MODIFIED + " DESC");
+                if (c == null) continue;
+                int bkI = c.getColumnIndex("bucket_display_name");
+                int bkIdI = c.getColumnIndex("bucket_id");
+                int sizeI = c.getColumnIndex(MediaStore.MediaColumns.SIZE);
+                int rows = 0;
+                while (c.moveToNext() && rows++ < 20000) {
+                    if (sizeI >= 0 && c.getLong(sizeI) <= 0) continue;
+                    String album = bkI >= 0 ? c.getString(bkI) : null;
+                    if (album == null || album.trim().isEmpty()) {
+                        album = bkIdI >= 0 ? ("相册" + c.getString(bkIdI)) : "其他";
+                    }
+                    album = safeName(album);
+                    Integer n = count.get(album);
+                    count.put(album, n == null ? 1 : n + 1);
+                }
+            } catch (Exception ignore) {
+            } finally {
+                if (c != null) c.close();
+            }
+        }
+        List<Map.Entry<String, Integer>> list = new ArrayList<>(count.entrySet());
+        list.sort((a, b) -> b.getValue() - a.getValue());
+        JSONArray arr = new JSONArray();
+        for (Map.Entry<String, Integer> e : list) {
+            JSONObject o = new JSONObject();
+            try {
+                o.put("name", e.getKey());
+                o.put("count", e.getValue());
+                arr.put(o);
+            } catch (Exception ignore) {
+            }
+        }
+        return arr.toString();
+    }
+
+    /** 已勾选的相册（空 = 全部）。 */
+    public static Set<String> selectedAlbums(Context ctx) {
+        Set<String> set = new HashSet<>();
+        try {
+            JSONArray arr = new JSONArray(SyncPrefs.albums(ctx));
+            for (int i = 0; i < arr.length(); i++) {
+                String s = arr.optString(i, "");
+                if (!s.isEmpty()) set.add(s);
+            }
+        } catch (Exception ignore) {
+        }
+        return set;
     }
 
     private static void ensureDir(String base, String token, String dir) throws Exception {

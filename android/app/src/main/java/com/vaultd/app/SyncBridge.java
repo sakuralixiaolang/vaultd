@@ -31,10 +31,45 @@ public class SyncBridge {
             o.put("result", SyncPrefs.lastResult(c));
             o.put("hasPermission", hasMediaPermission(c));
             o.put("gateway", !SyncPrefs.base(c).isEmpty());
+            o.put("keepAlbum", SyncPrefs.keepAlbum(c));
+            o.put("albums", new org.json.JSONArray(SyncPrefs.albums(c)));
             return o.toString();
         } catch (Exception e) {
             return "{\"error\":\"" + e.getMessage() + "\"}";
         }
+    }
+
+    /** 系统里有哪些相册（带文件数量），给设置面板勾选备份范围。 */
+    @JavascriptInterface
+    public String albums() {
+        if (!hasMediaPermission(act)) return "[]";
+        try {
+            return AutoSync.albumsJson(act);
+        } catch (Throwable t) {
+            return "[]";
+        }
+    }
+
+    /** 传 JSON 数组字符串，比如 ["Camera","WeiXin"]；传 [] 表示全部相册。 */
+    @JavascriptInterface
+    public String setAlbums(String json) {
+        try {
+            org.json.JSONArray arr = new org.json.JSONArray(json);
+            org.json.JSONArray out = new org.json.JSONArray();
+            for (int i = 0; i < arr.length(); i++) {
+                String s = arr.optString(i, "").trim();
+                if (!s.isEmpty()) out.put(s);
+            }
+            SyncPrefs.setAlbums(act, out.toString());
+        } catch (Exception ignore) {
+        }
+        return state();
+    }
+
+    @JavascriptInterface
+    public String setKeepAlbum(boolean on) {
+        SyncPrefs.setKeepAlbum(act, on);
+        return state();
     }
 
     @JavascriptInterface

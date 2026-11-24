@@ -398,7 +398,15 @@ func (v *Vault) Delete(ctx context.Context, remote string) error {
 	}
 	var err error
 	if _, e := v.f.NewObject(ctx, remote); e == nil {
-		err = v.Remove(ctx, remote)
+		// 注意：crypt 后端里目录也能 NewObject 成功，所以这里不能只看这一步，
+		// 真删失败（directory not empty）时再退回目录递归删除。
+		if rerr := v.Remove(ctx, remote); rerr == nil {
+			err = nil
+		} else if strings.Contains(strings.ToLower(rerr.Error()), "not empty") {
+			err = v.rmTree(ctx, remote, 0)
+		} else {
+			err = rerr
+		}
 	} else if _, e := v.f.List(ctx, remote); e == nil {
 		err = v.rmTree(ctx, remote, 0)
 	} else {
@@ -420,15 +428,31 @@ func (v *Vault) rmTree(ctx context.Context, dir string, depth int) error {
 	if err != nil {
 		return err
 	}
+	// 有些后端把「单个文件」也当列表返回一条自己，遇到这种就直接删文件
+	if len(entries) == 1 && path.Base(entries[0].Remote()) == path.Base(dir) {
+		if _, isDir := entries[0].(fs.Directory); !isDir {
+			o, oerr := v.f.NewObject(ctx, dir)
+			if oerr != nil {
+				return oerr
+			}
+			return o.Remove(ctx)
+		}
+	}
 	for _, e := range entries {
 		rel := path.Join(dir, path.Base(e.Remote()))
-		if o, err := v.f.NewObject(ctx, rel); err == nil {
-			if err := o.Remove(ctx); err != nil {
+		// 目录要往下递归；crypt 后端里目录也能 NewObject 成功，
+		// 直接 Remove 会报 directory not empty，所以必须先看类型。
+		if _, isDir := e.(fs.Directory); isDir {
+			if err := v.rmTree(ctx, rel, depth+1); err != nil {
 				return err
 			}
 			continue
 		}
-		if err := v.rmTree(ctx, rel, depth+1); err != nil {
+		o, err := v.f.NewObject(ctx, rel)
+		if err != nil {
+			continue
+		}
+		if err := o.Remove(ctx); err != nil {
 			return err
 		}
 	}

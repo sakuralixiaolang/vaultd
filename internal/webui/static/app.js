@@ -14,8 +14,11 @@ const state = {
   filter: localStorage.getItem("vaultd.filter") || "all",
   cache: {}, // path -> {at, entries, path}：来回翻目录不用重新请求
   renderKey: "",
+  limit: 80, // 一屏先画这么多，剩下的滚到底再追加，几百个文件也不卡
+  showDel: localStorage.getItem("vaultd.showDel") === "1", // 默认藏起 ×，防误删
   viewer: { items: [], index: -1, zoom: false },
 };
+document.body.classList.toggle("show-del", state.showDel);
 const $ = (id) => document.getElementById(id);
 
 // ---------- 主题：默认跟随系统，手动切过就记住 ----------
@@ -85,6 +88,88 @@ function toast(msg, kind = "err") {
   el.className = "toast " + kind;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.add("hidden"), 2600);
+}
+
+// 轻量的删除确认（不用 window.confirm：WebView 里容易不弹）
+let askResolve = null;
+function askOpen(text, yesLabel, withInput, initValue) {
+  const box = $("ask");
+  $("askText").textContent = text;
+  $("askYes").textContent = yesLabel;
+  const inp = $("askInput");
+  inp.classList.toggle("hidden", !withInput);
+  if (withInput) {
+    inp.value = initValue || "";
+    inp.placeholder = "输入名称";
+  }
+  box.classList.remove("hidden");
+  if (withInput) setTimeout(() => inp.focus(), 50);
+  return new Promise((resolve) => {
+    askResolve = resolve;
+  });
+}
+function askDelete(name) {
+  return askOpen("删除「" + name + "」？这个操作不能撤销。", "删除", false, "");
+}
+function askInput(text, value) {
+  return askOpen(text, "确定", true, value);
+}
+(function bindAsk() {
+  const done = (ok) => {
+    $("ask").classList.add("hidden");
+    const withInput = !$("askInput").classList.contains("hidden");
+    const val = $("askInput").value;
+    $("askYes").textContent = "删除";
+    const r = askResolve;
+    askResolve = null;
+    if (!r) return;
+    if (withInput) r(ok ? (val || "") : null);
+    else r(!!ok);
+  };
+  $("askYes").addEventListener("click", () => done(true));
+  $("askNo").addEventListener("click", () => done(false));
+  $("askInput").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); done(true); }
+  });
+  $("ask").addEventListener("click", (ev) => { if (ev.target === $("ask")) done(false); });
+})();
+
+// 长按删除：按住约 0.6 秒（手指稍微动一下就取消，不影响正常点击）
+function bindLongPress(el, entry) {
+  let timer = null;
+  let sx = 0;
+  let sy = 0;
+  const clear = () => {
+    if (timer) clearTimeout(timer);
+    timer = null;
+    el.classList.remove("pressing");
+  };
+  el.addEventListener("pointerdown", (ev) => {
+    if (ev.target.classList.contains("kill") || ev.target.classList.contains("del")) return;
+    sx = ev.clientX;
+    sy = ev.clientY;
+    el.classList.add("pressing");
+    timer = setTimeout(() => {
+      timer = null;
+      el.classList.remove("pressing");
+      el.__lp = true; // 长按已经处理过了，抬起时别再当成一次点击
+      removeEntry(entry);
+    }, 600);
+  });
+  el.addEventListener("click", (ev) => {
+    if (el.__lp) {
+      el.__lp = false;
+      ev.stopPropagation();
+      ev.preventDefault();
+    }
+  }, true);
+  el.addEventListener("pointermove", (ev) => {
+    if (Math.abs(ev.clientX - sx) > 12 || Math.abs(ev.clientY - sy) > 12) clear();
+  });
+  el.addEventListener("pointerup", clear);
+  el.addEventListener("pointercancel", clear);
+  el.addEventListener("pointerleave", clear);
+  el.addEventListener("contextmenu", (ev) => ev.preventDefault());
 }
 
 async function api(url, opts) {
@@ -256,10 +341,40 @@ function renderList(force) {
     return;
   }
   const frag = document.createDocumentFragment();
-  for (const e of shown) {
+  const lk = state.cwd + "#" + state.view + "#" + state.sort + "#" + state.filter;
+  if (state.limitFor !== lk) {
+    state.limitFor = lk;
+    state.limit = 80;
+  }
+  for (const e of shown.slice(0, state.limit)) {
     frag.appendChild(state.view === "grid" ? tileEl(e) : rowEl(e));
   }
   box.appendChild(frag);
+  paintMore(shown);
+}
+
+// 一屏之外的先不建 DOM：几百个文件时首屏直接快一截，滚到底再追加 80 个。
+function paintMore(shown) {
+  const box = $("list");
+  const old = box.querySelector(".more");
+  if (old) old.remove();
+  if (shown.length <= state.limit) return;
+  const btn = document.createElement("button");
+  btn.className = "more ghost tap";
+  btn.style.gridColumn = "1 / -1";
+  btn.style.marginTop = "8px";
+  btn.textContent = `显示更多（还有 ${shown.length - state.limit} 项）`;
+  btn.addEventListener("click", () => {
+    const from = state.limit;
+    state.limit += 80;
+    const frag = document.createDocumentFragment();
+    for (const e of shown.slice(from, state.limit)) {
+      frag.appendChild(state.view === "grid" ? tileEl(e) : rowEl(e));
+    }
+    box.insertBefore(frag, btn);
+    paintMore(shown);
+  });
+  box.appendChild(btn);
 }
 
 function renderFilters() {
@@ -440,6 +555,7 @@ function tileEl(e) {
     e.dir ? openDir(e.name) : openViewer(e);
   });
   el.querySelector(".kill").addEventListener("click", (ev) => { ev.stopPropagation(); removeEntry(e); });
+  bindLongPress(el, e);
   return el;
 }
 
@@ -462,11 +578,12 @@ function rowEl(e) {
     e.dir ? openDir(e.name) : openViewer(e);
   });
   el.querySelector(".del").addEventListener("click", (ev) => { ev.stopPropagation(); removeEntry(e); });
+  bindLongPress(el, e);
   return el;
 }
 
 async function removeEntry(e) {
-  if (!confirm("删除 " + e.name + " ？")) return;
+  if (!(await askDelete(e.name))) return;
   try {
     await api("/api/delete?path=" + encodeURIComponent(e.path), { method: "POST" });
     toast("已删除 " + e.name, "ok");
@@ -1005,8 +1122,10 @@ async function resolveUploadDir() {
 }
 
 $("btnMkdir").addEventListener("click", async () => {
-  const name = prompt("新建文件夹（在当前目录下）");
-  if (!name || !name.trim()) return;
+  const d = new Date();
+  const suggest = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const name = await askInput("新建文件夹（在当前目录下）", suggest);
+  if (name === null || !name.trim()) return;
   try {
     const p = joinPath(state.cwd, name.trim()).replace(/^\//, "");
     await api("/api/mkdir?path=" + encodeURIComponent(p), { method: "POST" });
@@ -1064,6 +1183,54 @@ function applySyncState(st) {
   $("btnSyncWifi").textContent = "仅 Wi-Fi：" + (st.wifiOnly ? "开" : "关");
   $("btnSyncPerm").classList.toggle("hidden", !!st.hasPermission);
   $("syncMsg").textContent = st.result || "";
+  $("btnSyncKeep").textContent = "按相册名分文件夹：" + (st.keepAlbum === false ? "关" : "开");
+  renderAlbumPicks(st.albums || []);
+}
+
+// 相册勾选：不选＝全部；点一下切换。选中的相册在云端各建一个同名文件夹。
+let albumCatalog = [];
+let albumSelected = [];
+
+function renderAlbumPicks(selected) {
+  albumSelected = Array.isArray(selected) ? selected.slice() : [];
+  const box = $("albumPicks");
+  if (!albumCatalog.length) {
+    box.innerHTML = `<span class="muted">${window.Sync && !syncCur.hasPermission ? "先点上面「授权访问相册」" : "还没有扫到相册"}</span>`;
+    return;
+  }
+  box.innerHTML = "";
+  for (const a of albumCatalog) {
+    const on = albumSelected.includes(a.name);
+    const b = document.createElement("button");
+    b.className = "pick tap" + (on ? " on" : "");
+    b.innerHTML = `<span class="tick">${on ? "✓" : "○"}</span><span>${escapeHtml(a.name)}</span><span class="n">${a.count}</span>`;
+    b.addEventListener("click", () => {
+      const i = albumSelected.indexOf(a.name);
+      if (i >= 0) albumSelected.splice(i, 1);
+      else albumSelected.push(a.name);
+      saveAlbums();
+    });
+    box.appendChild(b);
+  }
+}
+
+function saveAlbums() {
+  try {
+    applySyncState(JSON.parse(window.Sync.setAlbums(JSON.stringify(albumSelected))));
+    toast(albumSelected.length ? "只备份：" + albumSelected.join("、") : "备份全部相册", "ok");
+  } catch (e) {
+    toast("设置失败：" + e.message);
+  }
+}
+
+function loadAlbumCatalog() {
+  if (!window.Sync) return;
+  try {
+    albumCatalog = JSON.parse(window.Sync.albums()) || [];
+  } catch (e) {
+    albumCatalog = [];
+  }
+  renderAlbumPicks(albumSelected);
 }
 
 function refreshSyncState() {
@@ -1112,12 +1279,43 @@ function initSyncUI() {
       toast("同步目录已改为：" + syncCur.dir, "ok");
     } catch (e) { toast("设置失败：" + e.message); }
   });
+  $("btnSyncKeep").addEventListener("click", () => {
+    try {
+      applySyncState(JSON.parse(window.Sync.setKeepAlbum(!(syncCur.keepAlbum !== false))));
+      toast(syncCur.keepAlbum !== false ? "云端按相册名分文件夹" : "全部平铺在同步目录里", "ok");
+    } catch (e) { toast("设置失败：" + e.message); }
+  });
+  $("btnAlbumsAll").addEventListener("click", () => {
+    albumSelected = [];
+    saveAlbums();
+  });
+  // 打开设置面板时才去扫相册，避免开机就白跑一趟 MediaStore
+  $("setupPanel").addEventListener("click", () => loadAlbumCatalog(), { once: true });
   // 面板开着的时候隔几秒刷一次状态（同步是后台线程跑，只能轮询）
   setInterval(() => {
-    if (!$("setupPanel").classList.contains("hidden")) refreshSyncState();
+    if ($("setupPanel").classList.contains("hidden")) return;
+    refreshSyncState();
+    if (syncCur.hasPermission && !albumCatalog.length) loadAlbumCatalog();
   }, 5000);
 }
 initSyncUI();
+
+function applyShowDel() {
+  document.body.classList.toggle("show-del", state.showDel);
+  const b = $("btnShowDel");
+  if (b) b.textContent = "显示删除按钮（×）：" + (state.showDel ? "开" : "关");
+}
+
+(function initUiPrefs() {
+  $("uiBox").classList.remove("hidden");
+  applyShowDel();
+  $("btnShowDel").addEventListener("click", () => {
+    state.showDel = !state.showDel;
+    localStorage.setItem("vaultd.showDel", state.showDel ? "1" : "0");
+    applyShowDel();
+    toast(state.showDel ? "已显示删除按钮" : "已隐藏删除按钮，长按文件才能删", "ok");
+  });
+})();
 
 (async function boot() {
   try {

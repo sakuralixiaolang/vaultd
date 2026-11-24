@@ -91,7 +91,24 @@
         <label>云端目录<input id="syncDir" placeholder="相册备份" value="相册备份" autocomplete="off"></label>
         <label>网络<button id="btnSyncWifi" class="ghost tap" style="width:100%">仅 Wi-Fi：关</button></label>
       </div>
+      <div class="row">
+        <button id="btnSyncKeep" class="ghost tap">按相册名分文件夹：开</button>
+      </div>
+      <div class="picks-head">
+        <b>备份哪些相册</b>
+        <button id="btnAlbumsAll" class="ghost tap">全部相册</button>
+      </div>
+      <div id="albumPicks" class="picks"><span class="muted">授权后这里会列出系统相册</span></div>
+      <p class="hint">不勾选任何相册＝全部；勾选后只备份这几个。云端会按相册名建子文件夹，上面「分文件夹」关掉则全部平铺在云端目录里。</p>
       <p class="hint" id="syncMsg"></p>
+    </div>
+
+    <div id="uiBox" class="hidden">
+      <h2>界面与误删保护</h2>
+      <div class="row">
+        <button id="btnShowDel" class="ghost tap">显示删除按钮（×）：关</button>
+      </div>
+      <p class="hint">关掉之后格子和列表上都不再出现 × ，要删得长按文件（约半秒）再确认，手滑也不会误删。</p>
     </div>
   </section>
 
@@ -149,6 +166,17 @@
 </div>
 
 <div id="toast" class="toast hidden"></div>
+
+<div id="ask" class="ask hidden">
+  <div class="ask-box">
+    <div id="askText" class="ask-text"></div>
+    <input id="askInput" class="hidden" placeholder="输入名称" autocomplete="off">
+    <div class="row">
+      <button id="askNo" class="primary tap">取消</button>
+      <button id="askYes" class="ghost tap">删除</button>
+    </div>
+  </div>
+</div>
 
 <script src="/app.js"></script>
 </body>

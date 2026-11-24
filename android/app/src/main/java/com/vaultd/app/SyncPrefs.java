@@ -74,4 +74,23 @@ public final class SyncPrefs {
     public static void setLastScanMark(Context c, long v) {
         p(c).edit().putLong("last_scan_ms", v).apply();
     }
+
+    /** 要备份的相册名列表（JSON 数组字符串）；空数组表示「全部相册」。 */
+    public static String albums(Context c) {
+        String v = p(c).getString("albums", "[]");
+        return v == null || v.trim().isEmpty() ? "[]" : v;
+    }
+
+    public static void setAlbums(Context c, String json) {
+        p(c).edit().putString("albums", json == null ? "[]" : json).apply();
+    }
+
+    /** 上传时是否用「相册名」当子文件夹，保留原来的相册结构。 */
+    public static boolean keepAlbum(Context c) {
+        return p(c).getBoolean("keep_album", true);
+    }
+
+    public static void setKeepAlbum(Context c, boolean v) {
+        p(c).edit().putBoolean("keep_album", v).apply();
+    }
 }
