@@ -79,7 +79,12 @@ func Start(homeDir string) (string, error) {
 	token := hex.EncodeToString(tb)
 
 	srv := server.New(cfg, token)
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	// 端口固定：WebView 的 origin（含端口）稳定下来，localStorage、HTTP 缓存、
+	// 上次所在的目录与主题才能跨进程保留；端口被占再退回随机口。
+	l, err := net.Listen("tcp", "127.0.0.1:53511")
+	if err != nil {
+		l, err = net.Listen("tcp", "127.0.0.1:0")
+	}
 	if err != nil {
 		return "", err
 	}

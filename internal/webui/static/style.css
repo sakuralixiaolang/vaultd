@@ -8,7 +8,7 @@
   --accent: #14b8a6;
   --warn: #f59e0b;
   --err: #ef4444;
-  --header-bg: rgba(15,20,25,.94);
+  --header-bg: #0f1419;
   --btn: #1d262f;
   --input: #0d1319;
   --code: #0b1116;
@@ -37,7 +37,7 @@ body {
 header {
   display: flex; align-items: center; justify-content: space-between;
   gap: 10px; padding: calc(10px + var(--safe-t)) 14px 10px;
-  position: sticky; top: 0; background: var(--header-bg); backdrop-filter: blur(8px); z-index: 6;
+  position: sticky; top: 0; background: var(--header-bg); z-index: 6;
   border-bottom: 1px solid transparent;
   transition: border-color .15s;
 }
@@ -51,12 +51,21 @@ header.stuck { border-bottom-color: var(--line); }
 #keyfp { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 nav { display: flex; align-items: center; gap: 8px; flex: none; }
 
-.pathbar-wrap { position: sticky; top: 0; z-index: 5; padding: 0 8px; display: flex; }
-.pathbar {
-  width: 100%; text-align: left; background: transparent; border: none; color: var(--muted);
-  font-size: 12px; padding: 2px 6px 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+/* 面包屑：根目录 › 相册备份 › 2026-11，旁边留出横向滚动，层级深了也不换行 */
+.crumbs {
+  display: flex; align-items: center; gap: 2px;
+  padding: 0 14px 6px; overflow-x: auto; overflow-y: hidden;
+  scrollbar-width: none; -webkit-overflow-scrolling: touch; white-space: nowrap;
 }
-.pathbar:active { color: var(--text); }
+.crumbs::-webkit-scrollbar { display: none; }
+.crumb {
+  flex: none; border: 0; background: transparent; color: var(--muted);
+  font-size: 12px; line-height: 1.6; padding: 3px 6px; border-radius: 7px;
+  max-width: 42vw; overflow: hidden; text-overflow: ellipsis;
+}
+.crumb:active { background: var(--btn); }
+.crumb.on { color: var(--accent); font-weight: 600; }
+.crumb-sep, .crumb-dots { flex: none; color: var(--muted); font-size: 11px; opacity: .7; }
 
 main { max-width: 1080px; margin: 0 auto; padding: 0 12px calc(28px + var(--safe-b)); display: grid; gap: 12px; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
@@ -281,7 +290,7 @@ a.ghost:active { transform: scale(.97); }
   --text: #14202b;
   --muted: #5d6f7e;
   --accent: #0e9f8f;
-  --header-bg: rgba(242,245,248,.94);
+  --header-bg: #f2f5f8;
   --btn: #eef2f6;
   --input: #ffffff;
   --code: #eef2f5;
@@ -335,9 +344,9 @@ header {
   padding-left: max(14px, calc((100vw - var(--content-max)) / 2));
   padding-right: max(14px, calc((100vw - var(--content-max)) / 2));
 }
-.pathbar-wrap {
-  padding-left: max(8px, calc((100vw - var(--content-max)) / 2));
-  padding-right: max(8px, calc((100vw - var(--content-max)) / 2));
+.crumbs {
+  padding-left: max(14px, calc((100vw - var(--content-max)) / 2));
+  padding-right: max(14px, calc((100vw - var(--content-max)) / 2));
 }
 main {
   max-width: var(--content-max);

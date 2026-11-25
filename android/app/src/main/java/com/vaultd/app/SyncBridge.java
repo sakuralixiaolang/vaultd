@@ -105,6 +105,20 @@ public class SyncBridge {
     }
 
     @JavascriptInterface
+    public String getTheme() {
+        return SyncPrefs.theme(act);
+    }
+
+    /** 前端切主题时顺手写进原生设置：下次冷启动的窗口底色就不会闪。 */
+    @JavascriptInterface
+    public String setTheme(String t) {
+        String v = "light".equals(t) || "dark".equals(t) ? t : "";
+        SyncPrefs.setTheme(act, v);
+        act.applyThemeNow(v);
+        return v;
+    }
+
+    @JavascriptInterface
     public String setEnabled(boolean on) {
         if (on && SyncPrefs.lastScanMark(act) == 0) {
             // 第一次打开：从现在开始算，别把几百张旧照片一次全传上去

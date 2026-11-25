@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"image/jpeg"
 	_ "image/gif"
+	"image/jpeg"
 	_ "image/png"
 	"io"
 	"net/http"
@@ -87,6 +87,7 @@ func (s *Server) handleThumb(w http.ResponseWriter, r *http.Request) {
 		want = 1024
 	}
 
+	s.waitReady(r.Context())
 	v, err := s.needVault()
 	if err != nil {
 		writeErr(w, err)
@@ -188,7 +189,8 @@ func writeThumbStatus(w http.ResponseWriter, status int, err error) {
 	})
 }
 
-func serveThumb(w http.ResponseWriter, data []byte) {	h := w.Header()
+func serveThumb(w http.ResponseWriter, data []byte) {
+	h := w.Header()
 	h.Set("Content-Type", "image/jpeg")
 	h.Set("Content-Length", strconv.Itoa(len(data)))
 	h.Set("Cache-Control", fmt.Sprintf("private, max-age=%d", int(thumbMaxAge.Seconds())))

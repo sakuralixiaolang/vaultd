@@ -104,6 +104,16 @@ public final class SyncPrefs {
     public static boolean calls(Context c) { return p(c).getBoolean("sync_calls", false); }
     public static void setCalls(Context c, boolean v) { p(c).edit().putBoolean("sync_calls", v).apply(); }
 
+    /** 界面主题：""=跟随系统，light / dark=用户手动选过。 */
+    public static String theme(Context c) {
+        String v = p(c).getString("theme", "");
+        return v == null ? "" : v;
+    }
+
+    public static void setTheme(Context c, String v) {
+        p(c).edit().putString("theme", v == null ? "" : v).apply();
+    }
+
     public static String lastDigest(Context c, String key) {
         String v = p(c).getString(key, "");
         return v == null ? "" : v;

@@ -5,6 +5,8 @@ import android.app.Activity;
 import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
+import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -13,6 +15,7 @@ import android.provider.MediaStore;
 import android.view.ViewGroup;
 import android.webkit.CookieManager;
 import android.webkit.DownloadListener;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebSettings;
@@ -46,6 +49,8 @@ public class MainActivity extends Activity {
 
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
+    private String gatewayUrl;
+    private boolean webReady;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -53,8 +58,31 @@ public class MainActivity extends Activity {
 
         // 本构建为调试包：打开 WebView 调试端口，便于 adb 侧排查（正式包会关掉）。
         WebView.setWebContentsDebuggingEnabled(true);
-        web = new WebView(this);
-        WebSettings s = web.getSettings();
+        // 先把窗口底色刷成当前主题色：WebView 还没画出第一帧时不会黑一下/白一下。
+        applyWindowTheme(null);
+        web = buildWeb();
+        setContentView(web);
+
+        // targetSdk 33+ 的系统默认走「预测性返回」回调，onBackPressed 根本不会被调用，
+        // 所以要显式注册 OnBackInvokedCallback；老系统仍走 onBackPressed。
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    new android.window.OnBackInvokedCallback() {
+                        @Override
+                        public void onBackInvoked() {
+                            handleBack();
+                        }
+                    });
+        }
+
+        loadGateway();
+    }
+
+    /** 建一个 WebView：所有配置集中在这里，渲染进程崩了也能用同一份配置重建。 */
+    private WebView buildWeb() {
+        WebView w = new WebView(this);
+        WebSettings s = w.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         s.setMediaPlaybackRequiresUserGesture(false);
@@ -68,8 +96,36 @@ public class MainActivity extends Activity {
         s.setTextZoom(100);
         s.setSupportZoom(false);
         s.setBuiltInZoomControls(false);
-        web.setWebViewClient(new WebViewClient());
-        web.setWebChromeClient(new WebChromeClient() {
+        s.setCacheMode(WebSettings.LOAD_DEFAULT);
+        w.setBackgroundColor(themeBg(null));
+        w.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                webReady = true;
+            }
+
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                if (Build.VERSION.SDK_INT < 26) return false;
+                android.util.Log.e("vaultd", "WebView 渲染进程退出，crash=" + detail.didCrash());
+                try {
+                    ViewGroup parent = (ViewGroup) view.getParent();
+                    if (parent != null) parent.removeView(view);
+                    view.destroy();
+                } catch (Throwable ignored) {
+                }
+                web = buildWeb();
+                setContentView(web);
+                if (gatewayUrl != null && gatewayUrl.length() > 0) {
+                    web.loadUrl(gatewayUrl);
+                } else {
+                    loadGateway();
+                }
+                Toast.makeText(MainActivity.this, "界面已恢复", Toast.LENGTH_SHORT).show();
+                return true; // 已自行重建，系统别再杀进程
+            }
+        });
+        w.setWebChromeClient(new WebChromeClient() {
             @Override
             public boolean onShowFileChooser(WebView view, ValueCallback<Uri[]> callback,
                                              FileChooserParams params) {
@@ -91,46 +147,36 @@ public class MainActivity extends Activity {
             }
         });
 
-        setContentView(web);
-
         // 设置面板里的「相册自动同步」直接调原生（扫描 MediaStore + 前台服务）
-        web.addJavascriptInterface(new SyncBridge(this), "Sync");
+        w.addJavascriptInterface(new SyncBridge(this), "Sync");
 
         // 普通文件（文档/压缩包/安装包）要能取回：网关是带 cookie 的本地 http，
         // 系统下载器不带 cookie 会 401，所以这里自己拿 InputStream 落盘。
         CookieManager.getInstance().setAcceptCookie(true);
-        web.setDownloadListener(new DownloadListener() {
+        w.setDownloadListener(new DownloadListener() {
             @Override
             public void onDownloadStart(String url, String userAgent, String contentDisposition,
                                         String mimetype, long contentLength) {
                 downloadFile(url, contentDisposition, mimetype);
             }
         });
+        return w;
+    }
 
-        // targetSdk 33+ 的系统默认走「预测性返回」回调，onBackPressed 根本不会被调用，
-        // 所以要显式注册 OnBackInvokedCallback；老系统仍走 onBackPressed。
-        if (android.os.Build.VERSION.SDK_INT >= 33) {
-            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                    android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-                    new android.window.OnBackInvokedCallback() {
-                        @Override
-                        public void onBackInvoked() {
-                            handleBack();
-                        }
-                    });
-        }
-
+    private void loadGateway() {
         new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
                     final String url = mobile.Mobile.start(
                             getFilesDir().getAbsolutePath());
+                    gatewayUrl = url;
                     android.util.Log.i("vaultd", "gateway ready: " + url);
                     rememberGateway(url);
                     runOnUiThread(new Runnable() {
                         @Override
                         public void run() {
+                            if (web == null) return;
                             web.loadUrl(url);
                             if (SyncPrefs.enabled(MainActivity.this)) {
                                 SyncService.start(MainActivity.this);
@@ -426,11 +472,63 @@ public class MainActivity extends Activity {
         handleBack();
     }
 
+    // ---------- 主题：窗口底色与前端保持一致，冷启动不闪 ----------
+
+    private boolean darkTheme(String override) {
+        String t = override != null ? override : SyncPrefs.theme(this);
+        if ("dark".equals(t)) return true;
+        if ("light".equals(t)) return false;
+        int mode = getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
+        return mode != Configuration.UI_MODE_NIGHT_NO;
+    }
+
+    private int themeBg(String override) {
+        return darkTheme(override) ? 0xFF0F1419 : 0xFFF2F5F8;
+    }
+
+    private void applyWindowTheme(String override) {
+        int bg = themeBg(override);
+        getWindow().setBackgroundDrawable(new ColorDrawable(bg));
+        getWindow().setStatusBarColor(bg);
+        getWindow().setNavigationBarColor(bg);
+        if (Build.VERSION.SDK_INT >= 23) {
+            int vis = getWindow().getDecorView().getSystemUiVisibility();
+            if (darkTheme(override)) vis &= ~android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            else vis |= android.view.View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+            getWindow().getDecorView().setSystemUiVisibility(vis);
+        }
+    }
+
+    /** 前端切主题时调用：窗口、状态栏、WebView 底色一起换，并写进原生设置。 */
+    void applyThemeNow(final String t) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                applyWindowTheme(t);
+                if (web != null) web.setBackgroundColor(themeBg(t));
+            }
+        });
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // 系统深浅色变了且用户没手动选过：窗口与页面一起跟着换，不重建 Activity。
+        applyWindowTheme(null);
+        if (web != null) {
+            web.setBackgroundColor(themeBg(null));
+            if (SyncPrefs.theme(this).isEmpty()) {
+                web.evaluateJavascript("(window.vaultdThemeFromSystem && window.vaultdThemeFromSystem())", null);
+            }
+        }
+    }
+
     @Override
     protected void onDestroy() {
         try {
-            // 自动同步开着的时候别把网关停了：后台服务要靠它加密上传。
-            if (!SyncPrefs.enabled(this)) mobile.Mobile.stop();
+            // 只有用户真正退出（而不是转屏/分屏重建）才停网关；
+            // 系统因内存回收重建界面时保持网关活着，回来不用重新连。
+            if (isFinishing() && !SyncPrefs.enabled(this)) mobile.Mobile.stop();
         } catch (Exception ignored) {
         }
         if (web != null) {

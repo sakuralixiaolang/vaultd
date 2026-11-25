@@ -7,6 +7,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,12 +40,29 @@ type Server struct {
 	v         *vault.Vault
 	vErr      error
 	lastRetry time.Time
+
+	// ready 在首次建立密文库连接后关闭。网关先开始监听、先吐前端，
+	// 需要云端数据的接口再等它，冷启动就不用卡在“连云端”上。
+	ready chan struct{}
 }
 
 func New(cfg *localcfg.Config, token string) *Server {
-	s := &Server{cfg: cfg, token: token}
-	s.reload(context.Background())
+	s := &Server{cfg: cfg, token: token, ready: make(chan struct{})}
+	go func() {
+		s.reload(context.Background())
+		close(s.ready)
+	}()
 	return s
+}
+
+func (s *Server) waitReady(ctx context.Context) {
+	if s.ready == nil {
+		return
+	}
+	select {
+	case <-s.ready:
+	case <-ctx.Done():
+	}
 }
 
 // wantReconnect 做一次 10 秒限流，避免前端反复轮询时反复发起重连。
@@ -81,12 +100,10 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.guard(s.handleIndex))
 	mux.HandleFunc("/app.js", s.guard(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-		_, _ = w.Write(webui.AppJS)
+		serveAsset(w, r, "text/javascript; charset=utf-8", webui.AppJS)
 	}))
 	mux.HandleFunc("/style.css", s.guard(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		_, _ = w.Write(webui.StyleCSS)
+		serveAsset(w, r, "text/css; charset=utf-8", webui.StyleCSS)
 	}))
 	mux.HandleFunc("/api/status", s.guard(s.handleStatus))
 	mux.HandleFunc("/api/list", s.guard(s.handleList))
@@ -137,6 +154,21 @@ func (s *Server) guard(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// serveAsset 给内嵌的静态资源加 ETag：内容没变时 WebView 拿到 304，
+// 冷启动不用把 JS/CSS 重新解析一遍；内容变了（重新打包）哈希自然就变。
+func serveAsset(w http.ResponseWriter, r *http.Request, contentType string, body []byte) {
+	sum := sha256.Sum256(body)
+	tag := `"` + hex.EncodeToString(sum[:8]) + `"`
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("ETag", tag)
+	w.Header().Set("Cache-Control", "private, max-age=0, must-revalidate")
+	if inm := strings.TrimSpace(r.Header.Get("If-None-Match")); inm != "" && inm == tag {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	_, _ = w.Write(body)
+}
+
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -144,6 +176,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	s.waitReady(r.Context())
 	s.mu.RLock()
 	v, vErr := s.v, s.vErr
 	s.mu.RUnlock()
@@ -172,6 +205,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
+	s.waitReady(r.Context())
 	v, err := s.needVault()
 	if err != nil {
 		writeErr(w, err)
@@ -189,6 +223,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
+	s.waitReady(r.Context())
 	if r.Method != http.MethodPut {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -237,6 +272,7 @@ func uploadMTime(r *http.Request) time.Time {
 }
 
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
+	s.waitReady(r.Context())
 	v, err := s.needVault()
 	if err != nil {
 		writeErr(w, err)
@@ -312,6 +348,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	s.waitReady(r.Context())
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -335,6 +372,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 // handleMkdir 新建子目录。手机上「按文件夹上传」就是先建目录再把文件传进去，
 // 这样当前目录里只多出一个文件夹，不会散落一堆文件。
 func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
+	s.waitReady(r.Context())
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -636,4 +674,3 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 func Listen(addr string) (net.Listener, error) {
 	return net.Listen("tcp", addr)
 }
-

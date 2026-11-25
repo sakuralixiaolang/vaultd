@@ -12,7 +12,8 @@ const state = {
   view: localStorage.getItem("vaultd.view") || "grid",
   sort: localStorage.getItem("vaultd.sort") || "name",
   filter: localStorage.getItem("vaultd.filter") || "all",
-  cache: {}, // path -> {at, entries, path}：来回翻目录不用重新请求
+  cache: {}, // path -> {at, entries, path}：来回翻目录、冷启动都先拿它顶上
+  pendingScroll: false,
   renderKey: "",
   limit: 80, // 一屏先画这么多，剩下的滚到底再追加，几百个文件也不卡
   showDel: localStorage.getItem("vaultd.showDel") === "1", // 默认藏起 ×，防误删
@@ -20,13 +21,28 @@ const state = {
 };
 document.body.classList.toggle("show-del", state.showDel);
 const $ = (id) => document.getElementById(id);
+// 这些键名必须在读取缓存之前就初始化，否则会撞上 const 的暂时性死区。
+const LC_KEY = "vaultd.listcache.v1";
+const CWD_KEY = "vaultd.cwd";
+const SCROLL_KEY = "vaultd.scroll.v1";
+state.cache = loadDiskCache();
+state.cwd = readCwd();
+state.pendingScroll = true; // 冷启动也恢复上次滚动位置
 
-// ---------- 主题：默认跟随系统，手动切过就记住 ----------
+// ---------- 主题：默认跟随系统，手动切过就记住（同时写进原生设置，冷启动窗口底色一致） ----------
 const THEME_KEY = "vaultd.theme";
 function systemTheme() {
   return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
 }
-function applyTheme(t) {
+function savedTheme() {
+  try {
+    return localStorage.getItem(THEME_KEY) || (window.Sync && Sync.getTheme && Sync.getTheme()) || "";
+  } catch (e) {
+    return "";
+  }
+}
+function applyTheme(t, remember) {
+  if (t !== "light" && t !== "dark") t = systemTheme();
   document.documentElement.dataset.theme = t;
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.content = t === "light" ? "#f2f5f8" : "#0f1419";
@@ -35,8 +51,17 @@ function applyTheme(t) {
     btn.textContent = t === "light" ? "☾" : "☀";
     btn.title = t === "light" ? "切到深色" : "切到浅色";
   }
+  // 只有用户手动切换才写进原生设置；跟随系统时保持为空，系统换了还能跟着换。
+  if (remember && window.Sync && Sync.setTheme) {
+    try { Sync.setTheme(t); } catch (e) {}
+  }
 }
-applyTheme(localStorage.getItem(THEME_KEY) || systemTheme());
+applyTheme(savedTheme() || systemTheme(), false);
+// 原生侧改了系统深浅色（Activity 不重建）时回调这里：只有用户没手动选过才跟随。
+window.vaultdThemeFromSystem = () => {
+  if (!savedTheme()) applyTheme(systemTheme(), false);
+  return document.documentElement.dataset.theme;
+};
 
 const fmtSize = (n) => {
   if (n < 1024) return n + " B";
@@ -80,6 +105,78 @@ function whenNear(el, fn) {
   nearObserver.observe(el);
 }
 const joinPath = (dir, name) => "/" + [dir.replace(/\/+$/, ""), name].filter(Boolean).join("/").replace(/^\/+/, "");
+
+// ---------- 跨启动缓存：列表 + 上次目录 + 滚动位置 ----------
+// 网关端口现在是固定的，localStorage 才能真的留住；这样冷启动先拿旧列表画一屏，
+// 再在后台刷新，看起来就是「秒开」。
+function loadDiskCache() {
+  try {
+    const m = JSON.parse(localStorage.getItem(LC_KEY) || "{}");
+    return m && typeof m === "object" ? m : {};
+  } catch (e) {
+    return {};
+  }
+}
+function saveDiskCache() {
+  try {
+    const keys = Object.keys(state.cache)
+      .sort((a, b) => (state.cache[b].at || 0) - (state.cache[a].at || 0))
+      .slice(0, 8);
+    const out = {};
+    for (const k of keys) {
+      const c = state.cache[k];
+      const entries = (c.entries || []).slice(0, 600).map((e) => ({
+        name: e.name, path: e.path, dir: !!e.dir, size: e.size, mod_time: e.mod_time,
+      }));
+      out[k] = { at: c.at, path: c.path, entries };
+    }
+    localStorage.setItem(LC_KEY, JSON.stringify(out));
+  } catch (e) {
+    // 配额满了就放弃缓存，不影响使用
+    try { localStorage.removeItem(LC_KEY); } catch (e2) {}
+  }
+}
+function readCwd() {
+  try { return localStorage.getItem(CWD_KEY) || ""; } catch (e) { return ""; }
+}
+function saveCwd() {
+  try { localStorage.setItem(CWD_KEY, state.cwd || ""); } catch (e) {}
+}
+function readScrollMap() {
+  try { return JSON.parse(localStorage.getItem(SCROLL_KEY) || "{}") || {}; } catch (e) { return {}; }
+}
+function saveScroll() {
+  try {
+    const m = readScrollMap();
+    m[state.cwd || "/"] = window.scrollY || 0;
+    const keys = Object.keys(m).slice(-16);
+    const out = {};
+    for (const k of keys) out[k] = m[k];
+    localStorage.setItem(SCROLL_KEY, JSON.stringify(out));
+  } catch (e) {}
+}
+let scrollTimer = 0;
+window.addEventListener("scroll", () => {
+  clearTimeout(scrollTimer);
+  scrollTimer = setTimeout(saveScroll, 250);
+}, { passive: true });
+
+function restoreScroll() {
+  if (!state.pendingScroll) return;
+  state.pendingScroll = false;
+  const y = readScrollMap()[state.cwd || "/"] || 0;
+  if (!y) return;
+  requestAnimationFrame(() => window.scrollTo(0, y));
+}
+
+// 进目录统一走这里：先记住当前滚动位置，再记住目录，回来时原样恢复。
+function goTo(dir) {
+  saveScroll();
+  state.cwd = dir || "";
+  state.pendingScroll = true;
+  saveCwd();
+  loadList().catch((err) => toast("打开目录失败：" + err.message));
+}
 
 let toastTimer = 0;
 function toast(msg, kind = "err") {
@@ -188,6 +285,7 @@ async function api(url, opts) {
 async function loadStatus() {
   const s = await api("/api/status");
   state.status = s;
+  window.__statusAt = window.__statusAt || Math.round(performance.now());
   applyStatus(s);
   return s;
 }
@@ -224,32 +322,58 @@ function applyStatus(s) {
   }
 }
 
-async function loadList(opts) {
-  const force = !!(opts && opts.force);
-  const cached = state.cache[state.cwd];
-  if (!force && cached && Date.now() - cached.at < 8000) {
-    state.entries = cached.entries;
-    showPath(cached.path);
-    $("btnUp").disabled = state.cwd === "";
-    paintCount();
-    refreshTargetOptions();
-    renderList();
-    return;
-  }
-  const r = await api("/api/list?path=" + encodeURIComponent(state.cwd));
-  state.entries = r.entries || [];
-  state.cache[state.cwd] = { at: Date.now(), entries: state.entries, path: r.path || "/" };
-  showPath(r.path || "/");
+function applyEntries(entries, serverPath) {
+  if (!window.__firstListAt) window.__firstListAt = Math.round(performance.now());
+  state.entries = entries || [];
+  showPath(serverPath || "/");
   $("btnUp").disabled = state.cwd === "";
   paintCount();
   refreshTargetOptions();
   renderList();
+  restoreScroll();
+}
+
+async function loadList(opts) {
+  const force = !!(opts && opts.force);
+  const quiet = !!(opts && opts.quiet);
+  const cached = state.cache[state.cwd];
+  const fresh = cached && Date.now() - (cached.at || 0) < 8000;
+  // 有缓存就先画：新到 8 秒内的直接用；更旧的在后台悄悄刷新，页面不空等。
+  if (!force && cached && (fresh || (opts && opts.stale))) {
+    applyEntries(cached.entries, cached.path);
+    if (!fresh) refreshListInBackground();
+    return;
+  }
+  let r;
+  try {
+    r = await api("/api/list?path=" + encodeURIComponent(state.cwd));
+  } catch (err) {
+    // 上次记的目录已经没了（被删/改过名）：退回根目录再来一次，而不是卡在报错上。
+    if (state.cwd) {
+      state.cwd = "";
+      saveCwd();
+      return loadList({ force: true, quiet });
+    }
+    throw err;
+  }
+  state.cache[state.cwd] = { at: Date.now(), entries: r.entries || [], path: r.path || "/" };
+  applyEntries(state.cache[state.cwd].entries, r.path);
+  saveDiskCache();
+  saveCwd();
   // 列表既然拉到了，说明后台自己连上了；把状态与错误面板同步过来，
   // 否则手机开机网络晚到时会一直挂着「连接失败」的提示。
   if (state.vaultReady === false) {
     state.vaultReady = true;
     loadStatus().catch(() => {});
   }
+}
+
+let bgRefreshTimer = 0;
+function refreshListInBackground() {
+  clearTimeout(bgRefreshTimer);
+  bgRefreshTimer = setTimeout(() => {
+    loadList({ force: true, quiet: true }).catch(() => {});
+  }, 300);
 }
 
 function paintCount() {
@@ -259,8 +383,38 @@ function paintCount() {
 }
 
 function showPath(p) {
-  $("pathbar").textContent = p === "/" ? "根目录 /" : p;
-  $("pathbar").title = p;
+  const nav = $("crumbs");
+  if (!nav) return;
+  const segs = (p || "/").split("/").filter(Boolean);
+  nav.innerHTML = "";
+  const mk = (label, dir, on) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "crumb tap" + (on ? " on" : "");
+    b.textContent = label;
+    b.title = dir ? "/" + dir : "/";
+    b.addEventListener("click", () => { if (!on) goTo(dir); });
+    return b;
+  };
+  nav.appendChild(mk("根目录", "", segs.length === 0));
+  let acc = "";
+  // 层级太深只显示最后三级，前面用 … 省略，窄屏也能看清当前在哪。
+  const start = segs.length > 4 ? segs.length - 3 : 0;
+  if (start > 0) {
+    const dots = document.createElement("span");
+    dots.className = "crumb-dots";
+    dots.textContent = "…";
+    nav.appendChild(dots);
+  }
+  for (let i = start; i < segs.length; i++) {
+    acc = acc ? acc + "/" + segs[i] : segs[i];
+    const sep = document.createElement("span");
+    sep.className = "crumb-sep";
+    sep.textContent = "›";
+    nav.appendChild(sep);
+    nav.appendChild(mk(segs[i], acc, i === segs.length - 1));
+  }
+  nav.scrollLeft = nav.scrollWidth;
 }
 
 // 「上传到」下拉：当前目录 + 当前目录下的子文件夹 + 新建文件夹。
@@ -595,8 +749,7 @@ async function removeEntry(e) {
 }
 
 function openDir(name) {
-  state.cwd = joinPath(state.cwd, name).replace(/^\//, "");
-  loadList().catch((err) => toast("打开目录失败：" + err.message));
+  goTo(joinPath(state.cwd, name).replace(/^\//, ""));
 }
 
 // ---------- 查看器：左右切图 / 双击缩放 / Range 播放 ----------
@@ -806,13 +959,8 @@ document.addEventListener("keydown", (ev) => {
 
 $("btnRefresh").addEventListener("click", () => loadList({ force: true }).catch((err) => toast("刷新失败：" + err.message)));
 $("btnUp").addEventListener("click", () => {
-  state.cwd = state.cwd.split("/").slice(0, -1).join("/");
-  loadList().catch((err) => toast("返回失败：" + err.message));
-});
-$("pathbar").addEventListener("click", () => {
-  if (!state.cwd) return;
-  state.cwd = "";
-  loadList().catch((err) => toast("返回失败：" + err.message));
+  const parent = state.cwd.split("/").slice(0, -1).join("/");
+  goTo(parent);
 });
 $("btnSetup").addEventListener("click", () => {
   state.setupTouched = true; // 用户手动开过设置，之后状态刷新别再把它关掉
@@ -1157,7 +1305,7 @@ $("upFolder").addEventListener("change", syncNewFolderUI);
 $("btnTheme").addEventListener("click", () => {
   const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
   localStorage.setItem(THEME_KEY, next);
-  applyTheme(next);
+  applyTheme(next, true);
 });
 
 $("pickFile").addEventListener("click", (ev) => { ev.preventDefault(); $("fileInput").click(); });
@@ -1181,8 +1329,8 @@ window.vaultdBack = () => {
     return true;
   }
   if (state.cwd) {
-    state.cwd = state.cwd.split("/").slice(0, -1).join("/");
-    loadList().catch((err) => toast("返回失败：" + err.message));
+    saveScroll();
+    goTo(state.cwd.split("/").slice(0, -1).join("/"));
     return true;
   }
   return false;
@@ -1366,6 +1514,13 @@ function applyShowDel() {
 })();
 
 (async function boot() {
+  // 先用上次的缓存把列表画出来，不等 /api/status、更不等云端：
+  // 冷启动第一眼就是上次的目录和缩略图，随后再在后台刷新。
+  const cached = state.cache[state.cwd];
+  window.__bootCacheN = cached && cached.entries ? cached.entries.length : -1;
+  if (cached && cached.entries && cached.entries.length) {
+    applyEntries(cached.entries, cached.path);
+  }
   try {
     await loadStatus();
   } catch (e) {
@@ -1376,7 +1531,8 @@ function applyShowDel() {
   // 这里自带退避重试，免得用户对着空白的媒体库以为坏了。
   for (let i = 0; i < 5; i++) {
     try {
-      await loadList({ force: true });
+      await loadList({ force: i > 0, stale: true });
+      saveCwd();
       return;
     } catch (e) {
       console.error(e);
