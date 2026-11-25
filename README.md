@@ -42,6 +42,7 @@ scripts/selftest.ps1   无需真实云盘的全链路自测
 scripts/ui-fixture.ps1 离线 UI 验收：本机 WebDAV 替身 + 模拟器指向宿主机
 scripts/build-aar.ps1  重建安卓 Go 绑定
 scripts/native_accept.ps1  内置驱动端到端验收（40 MB 上传 + 90% Range）
+scripts/secret-scan.ps1   提交前自检：扫凭据、私人标识、真实对象名
 docs/选型结论.md        阶段 0 的检索与选型依据
 ```
 
@@ -278,4 +279,5 @@ App 名从「密文相册」改成「**我的网盘**」（`AndroidManifest.xml`
 第三方依赖：rclone（MIT，`crypt`/`chunker`/`webdav` 三个后端）、golang.org/x/mobile（BSD-3-Clause）。
 云盘接口的行为参照了 OpenList 的对应驱动实现（AGPL-3.0），但本仓库中的客户端与 WebDAV 端点是独立编写的，
 没有包含其源码；如果你要再分发本仓库，请自行评估你所在司法辖区的相关要求。
+
 
