@@ -93,4 +93,28 @@ public final class SyncPrefs {
     public static void setKeepAlbum(Context c, boolean v) {
         p(c).edit().putBoolean("keep_album", v).apply();
     }
+
+    // ---- 通讯录 / 短信 / 通话记录：开关 + 当天快照的哈希（内容没变就不重复上传） ----
+    public static boolean contacts(Context c) { return p(c).getBoolean("sync_contacts", false); }
+    public static void setContacts(Context c, boolean v) { p(c).edit().putBoolean("sync_contacts", v).apply(); }
+
+    public static boolean sms(Context c) { return p(c).getBoolean("sync_sms", false); }
+    public static void setSms(Context c, boolean v) { p(c).edit().putBoolean("sync_sms", v).apply(); }
+
+    public static boolean calls(Context c) { return p(c).getBoolean("sync_calls", false); }
+    public static void setCalls(Context c, boolean v) { p(c).edit().putBoolean("sync_calls", v).apply(); }
+
+    public static String lastDigest(Context c, String key) {
+        String v = p(c).getString(key, "");
+        return v == null ? "" : v;
+    }
+
+    public static String lastDigestDay(Context c, String key) {
+        String v = p(c).getString(key + "_day", "");
+        return v == null ? "" : v;
+    }
+
+    public static void setLastDigest(Context c, String key, String digest, String day) {
+        p(c).edit().putString(key, digest).putString(key + "_day", day).apply();
+    }
 }

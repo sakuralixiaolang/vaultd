@@ -438,6 +438,34 @@ func (v *Vault) rmTree(ctx context.Context, dir string, depth int) error {
 			return o.Remove(ctx)
 		}
 	}
+	// 139 云的目录列表有秒级最终一致性：刚删完子项的目录立刻 Rmdir 可能报
+	// directory not empty，所以每一轮失败都重新扫一遍、把还看得见的子项再删掉。
+	var err2 error
+	for i := 0; i < 6; i++ {
+		if err2 = v.removeChildren(ctx, dir, depth); err2 != nil {
+			return err2
+		}
+		if err2 = v.f.Rmdir(ctx, dir); err2 == nil {
+			return nil
+		}
+		if !strings.Contains(strings.ToLower(err2.Error()), "not empty") {
+			return err2
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(1000*(i+1)) * time.Millisecond):
+		}
+	}
+	return err2
+}
+
+// removeChildren 删掉一层的子项：目录继续往下递归，文件直接删。
+func (v *Vault) removeChildren(ctx context.Context, dir string, depth int) error {
+	entries, err := v.f.List(ctx, dir)
+	if err != nil {
+		return err
+	}
 	for _, e := range entries {
 		rel := path.Join(dir, path.Base(e.Remote()))
 		// 目录要往下递归；crypt 后端里目录也能 NewObject 成功，
@@ -453,23 +481,17 @@ func (v *Vault) rmTree(ctx context.Context, dir string, depth int) error {
 			continue
 		}
 		if err := o.Remove(ctx); err != nil {
+			// 类型判断失手（个别后端不返回 fs.Directory）时，靠报错内容兜底
+			if strings.Contains(strings.ToLower(err.Error()), "not empty") {
+				if err2 := v.rmTree(ctx, rel, depth+1); err2 != nil {
+					return err2
+				}
+				continue
+			}
 			return err
 		}
 	}
-	// 139 云的目录列表有秒级最终一致性：刚删完子项的目录立刻 Rmdir 可能报
-	// directory not empty，这里小退避重试几次。
-	var err2 error
-	for i := 0; i < 4; i++ {
-		if err2 = v.f.Rmdir(ctx, dir); err2 == nil {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Duration(1200*(i+1)) * time.Millisecond):
-		}
-	}
-	return err2
+	return nil
 }
 
 // cleanRel 归一化为安全的相对路径，禁止路径逃逸。

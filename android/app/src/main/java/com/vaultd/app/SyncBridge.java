@@ -33,10 +33,42 @@ public class SyncBridge {
             o.put("gateway", !SyncPrefs.base(c).isEmpty());
             o.put("keepAlbum", SyncPrefs.keepAlbum(c));
             o.put("albums", new org.json.JSONArray(SyncPrefs.albums(c)));
+            o.put("contacts", SyncPrefs.contacts(c));
+            o.put("sms", SyncPrefs.sms(c));
+            o.put("calls", SyncPrefs.calls(c));
+            o.put("hasContacts", has(c, Manifest.permission.READ_CONTACTS));
+            o.put("hasSms", has(c, Manifest.permission.READ_SMS));
+            o.put("hasCalls", has(c, Manifest.permission.READ_CALL_LOG));
             return o.toString();
         } catch (Exception e) {
             return "{\"error\":\"" + e.getMessage() + "\"}";
         }
+    }
+
+    private static boolean has(Context c, String perm) {
+        try {
+            return c.checkSelfPermission(perm) == PackageManager.PERMISSION_GRANTED;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    @JavascriptInterface
+    public String setContacts(boolean on) {
+        SyncPrefs.setContacts(act, on);
+        return state();
+    }
+
+    @JavascriptInterface
+    public String setSms(boolean on) {
+        SyncPrefs.setSms(act, on);
+        return state();
+    }
+
+    @JavascriptInterface
+    public String setCalls(boolean on) {
+        SyncPrefs.setCalls(act, on);
+        return state();
     }
 
     /** 系统里有哪些相册（带文件数量），给设置面板勾选备份范围。 */

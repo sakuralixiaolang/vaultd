@@ -198,7 +198,7 @@ function applyStatus(s) {
   $("keyfp").textContent = s.key_fingerprint ? "密钥 " + s.key_fingerprint + "…" : "";
   const dot = $("health");
   dot.className = "dot " + (s.vault_ready ? "ok" : s.configured ? "err" : "");
-  $("setupPanel").classList.toggle("hidden", !!s.configured && !!s.vault_ready);
+  $("setupPanel").classList.toggle("hidden", !state.setupTouched && !!s.configured && !!s.vault_ready);
   if (s.vault_error) $("setupMsg").textContent = "连接失败：" + s.vault_error;
 
   // 接入方式：全新设备（还没配置）默认就是内置直连；老的外部 WebDAV 配置则沿用 WebDAV。
@@ -814,7 +814,24 @@ $("pathbar").addEventListener("click", () => {
   state.cwd = "";
   loadList().catch((err) => toast("返回失败：" + err.message));
 });
-$("btnSetup").addEventListener("click", () => $("setupPanel").classList.toggle("hidden"));
+$("btnSetup").addEventListener("click", () => {
+  state.setupTouched = true; // 用户手动开过设置，之后状态刷新别再把它关掉
+  $("setupPanel").classList.toggle("hidden");
+});
+
+// 设置面板切成「接入 / 备份 / 界面」三页，避免一屏滚到底
+function setTab(name) {
+  $("tabConnect").classList.toggle("hidden", name !== "connect");
+  $("tabBackup").classList.toggle("hidden", name !== "backup");
+  $("tabUI").classList.toggle("hidden", name !== "ui");
+  $("btnTabConnect").classList.toggle("on", name === "connect");
+  $("btnTabBackup").classList.toggle("on", name === "backup");
+  $("btnTabUi").classList.toggle("on", name === "ui");
+  if (name === "backup") loadAlbumCatalog();
+}
+$("btnTabConnect").addEventListener("click", () => setTab("connect"));
+$("btnTabBackup").addEventListener("click", () => setTab("backup"));
+$("btnTabUi").addEventListener("click", () => setTab("ui"));
 
 $("btnGrid").addEventListener("click", () => setView("grid"));
 $("btnList").addEventListener("click", () => setView("list"));
@@ -1185,6 +1202,20 @@ function applySyncState(st) {
   $("syncMsg").textContent = st.result || "";
   $("btnSyncKeep").textContent = "按相册名分文件夹：" + (st.keepAlbum === false ? "关" : "开");
   renderAlbumPicks(st.albums || []);
+  syncToggle("btnContacts", !!st.contacts);
+  syncToggle("btnSms", !!st.sms);
+  syncToggle("btnCalls", !!st.calls);
+  const needPerm = !st.hasPermission || !st.hasContacts || !st.hasSms || !st.hasCalls;
+  $("btnPermAll").classList.toggle("hidden", !needPerm);
+  $("btnSyncPerm").classList.toggle("hidden", !needPerm);
+}
+
+function syncToggle(id, on) {
+  const b = $(id);
+  if (!b) return;
+  b.textContent = on ? "开" : "关";
+  b.classList.toggle("on", on);
+  b.classList.toggle("primary", on);
 }
 
 // 相册勾选：不选＝全部；点一下切换。选中的相册在云端各建一个同名文件夹。
@@ -1249,6 +1280,9 @@ function initSyncUI() {
   const box = $("syncBox");
   if (!window.Sync) {
     box.classList.add("hidden");
+    // PC 端没有系统相册/短信这些数据源，整个「备份」页直接藏掉
+    $("btnTabBackup").classList.add("hidden");
+    $("tabBackup").classList.add("hidden");
     return;
   }
   box.classList.remove("hidden");
@@ -1288,6 +1322,20 @@ function initSyncUI() {
   $("btnAlbumsAll").addEventListener("click", () => {
     albumSelected = [];
     saveAlbums();
+  });
+  const bindKind = (id, setter, key, label) => {
+    $(id).addEventListener("click", () => {
+      try {
+        applySyncState(JSON.parse(window.Sync[setter](!syncCur[key])));
+        toast(label + (syncCur[key] ? "已加入备份" : "已暂停备份"), "ok");
+      } catch (e) { toast("设置失败：" + e.message); }
+    });
+  };
+  bindKind("btnContacts", "setContacts", "contacts", "通讯录");
+  bindKind("btnSms", "setSms", "sms", "短信");
+  bindKind("btnCalls", "setCalls", "calls", "通话记录");
+  $("btnPermAll").addEventListener("click", () => {
+    try { window.Sync.requestPermissions(); } catch (e) { toast("授权失败：" + e.message); }
   });
   // 打开设置面板时才去扫相册，避免开机就白跑一趟 MediaStore
   $("setupPanel").addEventListener("click", () => loadAlbumCatalog(), { once: true });

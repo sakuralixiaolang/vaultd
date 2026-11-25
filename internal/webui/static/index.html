@@ -26,6 +26,12 @@
 
 <main>
   <section id="setupPanel" class="panel hidden">
+    <div class="seg tabs">
+      <button id="btnTabConnect" class="on tap">接入</button>
+      <button id="btnTabBackup" class="tap">备份</button>
+      <button id="btnTabUi" class="tap">界面</button>
+    </div>
+    <div id="tabConnect">
     <h2 id="setupTitle">云端接入</h2>
     <div class="seg mode-seg">
       <button id="btnModeNative" class="tap">内置直连（139）</button>
@@ -79,6 +85,9 @@
       </div>
     </div>
 
+    </div>
+
+    <div id="tabBackup" class="hidden">
     <div id="syncBox" class="hidden">
       <h2>相册自动同步 <span class="muted" id="syncState">未开启</span></h2>
       <p class="hint">App 在后台每 15 分钟扫一次系统相机/相册里的新照片和视频，直接加密传到云端的这个目录里；已经传过的不再重复传。</p>
@@ -100,15 +109,39 @@
       </div>
       <div id="albumPicks" class="picks"><span class="muted">授权后这里会列出系统相册</span></div>
       <p class="hint">不勾选任何相册＝全部；勾选后只备份这几个。云端会按相册名建子文件夹，上面「分文件夹」关掉则全部平铺在云端目录里。</p>
+
+      <div class="picks-head">
+        <b>通讯录 / 短信 / 通话记录</b>
+        <button id="btnPermAll" class="ghost tap">授权</button>
+      </div>
+      <div class="opts">
+        <div class="opt">
+          <div class="opt-t"><b>通讯录</b><span class="muted">导出 vCard（姓名 + 号码），每天一份</span></div>
+          <button id="btnContacts" class="ghost tap">关</button>
+        </div>
+        <div class="opt">
+          <div class="opt-t"><b>短信</b><span class="muted">最近 2000 条，JSON 快照</span></div>
+          <button id="btnSms" class="ghost tap">关</button>
+        </div>
+        <div class="opt">
+          <div class="opt-t"><b>通话记录</b><span class="muted">最近 2000 条，JSON 快照</span></div>
+          <button id="btnCalls" class="ghost tap">关</button>
+        </div>
+      </div>
+      <p class="hint">这三类会存到云端目录下的「通讯录 / 短信 / 通话记录」子文件夹，内容没变当天不会重复上传。</p>
       <p class="hint" id="syncMsg"></p>
     </div>
 
+    </div>
+
+    <div id="tabUI" class="hidden">
     <div id="uiBox" class="hidden">
       <h2>界面与误删保护</h2>
       <div class="row">
         <button id="btnShowDel" class="ghost tap">显示删除按钮（×）：关</button>
       </div>
       <p class="hint">关掉之后格子和列表上都不再出现 × ，要删得长按文件（约半秒）再确认，手滑也不会误删。</p>
+    </div>
     </div>
   </section>
 

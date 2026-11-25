@@ -98,7 +98,9 @@ public final class AutoSync {
             SyncPrefs.setLastScanMark(ctx, System.currentTimeMillis());
             SyncPrefs.setLastRun(ctx, System.currentTimeMillis());
             r.ok = r.failed == 0;
-            r.msg = "上传 " + r.uploaded + " · 跳过 " + r.skipped + (r.failed > 0 ? " · 失败 " + r.failed : "");
+            String extra = Extras.run(ctx, base, token, dir);
+            r.msg = "上传 " + r.uploaded + " · 跳过 " + r.skipped + (r.failed > 0 ? " · 失败 " + r.failed : "")
+                    + (extra.isEmpty() ? "" : " · " + extra);
             SyncPrefs.setLastResult(ctx, r.msg + " · " + now());
         } catch (Exception e) {
             r.ok = false;
@@ -282,7 +284,7 @@ public final class AutoSync {
         return set;
     }
 
-    private static void ensureDir(String base, String token, String dir) throws Exception {
+    static void ensureDir(String base, String token, String dir) throws Exception {
         String[] parts = dir.split("/");
         StringBuilder acc = new StringBuilder();
         for (String part : parts) {

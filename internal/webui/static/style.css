@@ -390,3 +390,23 @@ body:not(.show-del) .album.list-mode .del { display: none !important; }
 
 /* 长按按压反馈 */
 .tile.pressing, .item.pressing { opacity: .72; transform: scale(.97); }
+
+/* ---------- 设置面板分页 ---------- */
+.seg.tabs { display: flex; width: 100%; margin: 0 0 12px; }
+.seg.tabs button { flex: 1; }
+.seg.tabs button.on { background: rgba(20,184,166,.16); color: var(--fg, inherit); font-weight: 600; }
+
+/* ---------- 备份条目行（通讯录/短信/通话） ---------- */
+.opts { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; margin-bottom: 10px; }
+.opt { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--input); }
+.opt + .opt { border-top: 1px solid var(--line); }
+.opt-t { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.opt-t b { font-size: 13px; }
+.opt-t .muted { font-size: 11px; line-height: 1.4; }
+.opt button { flex: none; min-width: 58px; }
+.opt button.on { border-color: var(--accent); color: var(--accent); }
+
+/* 相册很多时别把面板撑到无限长 */
+.picks { max-height: 148px; overflow-y: auto; padding-right: 2px; }
+.picks::-webkit-scrollbar { width: 4px; }
+.picks::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
