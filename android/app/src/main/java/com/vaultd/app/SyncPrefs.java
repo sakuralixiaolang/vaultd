@@ -94,6 +94,22 @@ public final class SyncPrefs {
         p(c).edit().putBoolean("keep_album", v).apply();
     }
 
+    /** 任意文件夹备份：用户在系统目录选择器里挑的目录（JSON 数组：[{uri,name}]）。 */
+    public static String folders(Context c) {
+        String v = p(c).getString("folders", "[]");
+        return v == null || v.trim().isEmpty() ? "[]" : v;
+    }
+
+    public static void setFolders(Context c, String json) {
+        p(c).edit().putString("folders", json == null ? "[]" : json).apply();
+    }
+
+    /** 任意文件夹备份在云端放的顶层目录。 */
+    public static String folderDir(Context c) {
+        String v = p(c).getString("folder_dir", "文件备份");
+        return v == null || v.trim().isEmpty() ? "文件备份" : v.trim();
+    }
+
     // ---- 通讯录 / 短信 / 通话记录：开关 + 当天快照的哈希（内容没变就不重复上传） ----
     public static boolean contacts(Context c) { return p(c).getBoolean("sync_contacts", false); }
     public static void setContacts(Context c, boolean v) { p(c).edit().putBoolean("sync_contacts", v).apply(); }

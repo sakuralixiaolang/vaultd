@@ -6,6 +6,7 @@ import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.database.Cursor;
 import android.graphics.drawable.ColorDrawable;
 import android.net.Uri;
 import android.os.Build;
@@ -46,6 +47,7 @@ public class MainActivity extends Activity {
 
     private static final int REQ_FILE = 1001;
     private static final int REQ_MEDIA = 1002;
+    private static final int REQ_DIR = 1003;
 
     private WebView web;
     private ValueCallback<Uri[]> fileCallback;
@@ -356,8 +358,61 @@ public class MainActivity extends Activity {
         setContentView(box);
     }
 
+    /** 设置面板里的「添加文件夹」：拉起系统目录选择器，选完整棵目录递归备份。 */
+    void pickFolder() {
+        try {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                    | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+            startActivityForResult(i, REQ_DIR);
+        } catch (Exception e) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    Toast.makeText(MainActivity.this, "打不开目录选择器：" + e.getMessage(),
+                            Toast.LENGTH_LONG).show();
+                }
+            });
+        }
+    }
+
+    /** SAF 只给 URI，名字要再查一次 DocumentsContract。 */
+    private String treeName(Uri tree) {
+        Cursor c = null;
+        try {
+            Uri doc = android.provider.DocumentsContract.buildDocumentUriUsingTree(
+                    tree, android.provider.DocumentsContract.getTreeDocumentId(tree));
+            c = getContentResolver().query(doc,
+                    new String[]{android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME},
+                    null, null, null);
+            if (c != null && c.moveToFirst()) {
+                String n = c.getString(0);
+                if (n != null && !n.trim().isEmpty()) return n.trim();
+            }
+        } catch (Exception ignore) {
+        } finally {
+            if (c != null) c.close();
+        }
+        return "文件夹";
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode == REQ_DIR) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                Uri uri = data.getData();
+                try {
+                    getContentResolver().takePersistableUriPermission(uri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                } catch (Exception ignore) {
+                }
+                String name = treeName(uri);
+                FolderSync.addFolder(this, uri, name);
+                notifySyncUpdate("已添加文件夹：" + name);
+            }
+            return;
+        }
         if (requestCode == REQ_FILE) {
             if (fileCallback == null) {
                 super.onActivityResult(requestCode, resultCode, data);

@@ -1350,6 +1350,8 @@ function applySyncState(st) {
   $("syncMsg").textContent = st.result || "";
   $("btnSyncKeep").textContent = "按相册名分文件夹：" + (st.keepAlbum === false ? "关" : "开");
   renderAlbumPicks(st.albums || []);
+  renderFolders(st.folders || []);
+  if ($("folderRoot")) $("folderRoot").textContent = st.folderDir || "文件备份";
   syncToggle("btnContacts", !!st.contacts);
   syncToggle("btnSms", !!st.sms);
   syncToggle("btnCalls", !!st.calls);
@@ -1396,6 +1398,39 @@ function renderAlbumPicks(selected) {
       saveAlbums();
     });
     box.appendChild(b);
+  }
+}
+
+// 任意文件夹：系统目录选择器选中的目录列表
+function renderFolders(list) {
+  const box = $("folderList");
+  if (!box) return;
+  if (!Array.isArray(list) || !list.length) {
+    box.innerHTML = `<span class="muted">还没添加。可以选「下载」「微信」「Documents」等任意目录，整棵目录递归备份。</span>`;
+    return;
+  }
+  box.innerHTML = "";
+  const root = syncCur.folderDir || "文件备份";
+  for (const f of list) {
+    const name = f.name || "文件夹";
+    const d = document.createElement("div");
+    d.className = "folder-item";
+    d.innerHTML = `<span class="fi-ico">📁</span>` +
+      `<span class="fi-t"><span class="fi-n">${escapeHtml(name)}</span>` +
+      `<span class="fi-p">云端：${escapeHtml(root + "/" + name)}</span></span>`;
+    const x = document.createElement("button");
+    x.className = "fx ghost tap";
+    x.textContent = "移除";
+    x.addEventListener("click", () => {
+      try {
+        applySyncState(JSON.parse(window.Sync.removeFolder(f.uri)));
+        toast("已移除：" + name, "ok");
+      } catch (e) {
+        toast("移除失败：" + e.message);
+      }
+    });
+    d.appendChild(x);
+    box.appendChild(d);
   }
 }
 
@@ -1476,6 +1511,12 @@ function initSyncUI() {
   $("btnAlbumsAll").addEventListener("click", () => {
     albumSelected = [];
     saveAlbums();
+  });
+  $("btnAddFolder").addEventListener("click", () => {
+    try {
+      window.Sync.pickFolder();
+      toast("选好文件夹后会自动加入备份列表", "ok");
+    } catch (e) { toast("打开目录选择器失败：" + e.message); }
   });
   const bindKind = (id, setter, key, label) => {
     $(id).addEventListener("click", () => {

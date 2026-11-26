@@ -104,8 +104,10 @@ public final class AutoSync {
             SyncPrefs.setLastRun(ctx, System.currentTimeMillis());
             r.ok = r.failed == 0;
             String extra = Extras.run(ctx, base, token, dir);
+            String folders = FolderSync.run(ctx, base, token);
             r.msg = "上传 " + r.uploaded + " · 跳过 " + r.skipped + (r.failed > 0 ? " · 失败 " + r.failed : "")
-                    + (extra.isEmpty() ? "" : " · " + extra);
+                    + (extra.isEmpty() ? "" : " · " + extra)
+                    + (folders.isEmpty() ? "" : " · " + folders);
             SyncPrefs.setLastResult(ctx, r.msg + " · " + now());
         } catch (Exception e) {
             r.ok = false;

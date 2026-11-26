@@ -121,6 +121,13 @@
       <p class="hint">不勾选任何相册＝全部；勾选后只备份这几个。云端会按相册名建子文件夹，上面「分文件夹」关掉则全部平铺在云端目录里。</p>
 
       <div class="picks-head">
+        <b>任意文件夹</b>
+        <button id="btnAddFolder" class="ghost tap">＋ 添加文件夹</button>
+      </div>
+      <div id="folderList" class="folder-list"><span class="muted">还没添加。可以选「下载」「微信」「Documents」等任意目录，整棵目录递归备份。</span></div>
+      <p class="hint">云端放在「<span id="folderRoot">文件备份</span>／文件夹名／」下，保留原来的层级；第一次会全量上传，之后按「文件名 + 大小」跳过没变的。跟着「自动同步」一起跑，也可以点上面的「立即同步」。系统不允许选择 Android/data、Android/obb 和存储根目录。</p>
+
+      <div class="picks-head">
         <b>通讯录 / 短信 / 通话记录</b>
         <button id="btnPermAll" class="ghost tap">授权</button>
       </div>

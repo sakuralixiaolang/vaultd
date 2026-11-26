@@ -33,6 +33,8 @@ public class SyncBridge {
             o.put("gateway", !SyncPrefs.base(c).isEmpty());
             o.put("keepAlbum", SyncPrefs.keepAlbum(c));
             o.put("albums", new org.json.JSONArray(SyncPrefs.albums(c)));
+            o.put("folders", FolderSync.list(c));
+            o.put("folderDir", SyncPrefs.folderDir(c));
             o.put("contacts", SyncPrefs.contacts(c));
             o.put("sms", SyncPrefs.sms(c));
             o.put("calls", SyncPrefs.calls(c));
@@ -101,6 +103,19 @@ public class SyncBridge {
     @JavascriptInterface
     public String setKeepAlbum(boolean on) {
         SyncPrefs.setKeepAlbum(act, on);
+        return state();
+    }
+
+    /** 拉起系统目录选择器；选完在 onActivityResult 里记下，下次同步自动带上。 */
+    @JavascriptInterface
+    public String pickFolder() {
+        act.pickFolder();
+        return state();
+    }
+
+    @JavascriptInterface
+    public String removeFolder(String uri) {
+        FolderSync.removeFolder(act, uri == null ? "" : uri);
         return state();
     }
 
