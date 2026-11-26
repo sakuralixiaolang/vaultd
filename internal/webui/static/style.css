@@ -376,15 +376,29 @@ body:not(.show-del) .album.list-mode .del { display: none !important; }
 
 /* ---------- 相册勾选 ---------- */
 .picks-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 12px 0 6px; }
-.picks { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.picks { display: grid; grid-template-columns: repeat(auto-fill, minmax(156px, 1fr)); gap: 8px; margin-bottom: 8px; }
 .pick {
-  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
-  padding: 7px 11px; border-radius: 999px; border: 1px solid var(--line);
-  background: var(--input); color: inherit; font-size: 12px; min-height: 34px;
+  position: relative; display: flex; align-items: center; gap: 9px; max-width: 100%;
+  padding: 6px; border-radius: 12px; border: 1px solid var(--line);
+  background: var(--input); color: inherit; font-size: 12px; min-height: 58px; text-align: left;
 }
+.pick-cover {
+  width: 46px; height: 46px; flex: none; border-radius: 8px; overflow: hidden;
+  background: var(--tile); display: flex; align-items: center; justify-content: center;
+  font-size: 20px; color: var(--muted);
+}
+.pick-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pick-txt { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pick-name { font-weight: 600; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pick-sub { color: var(--muted); font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pick .n { color: var(--muted); font-size: 11px; }
-.pick.on { border-color: var(--accent); background: rgba(20,184,166,.14); }
-.pick .tick { width: 14px; text-align: center; }
+.pick.on { border-color: var(--accent); background: rgba(20,184,166,.10); }
+.pick .tick {
+  display: none; position: absolute; top: 5px; right: 5px; width: 17px; height: 17px;
+  border-radius: 50%; background: var(--accent); color: #fff; font-size: 10px;
+  line-height: 17px; text-align: center;
+}
+.pick.on .tick { display: block; }
 
 /* ---------- 删除确认（长按触发） ---------- */
 .ask { position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.45); display: flex; align-items: flex-end; }
@@ -416,6 +430,6 @@ body:not(.show-del) .album.list-mode .del { display: none !important; }
 .opt button.on { border-color: var(--accent); color: var(--accent); }
 
 /* 相册很多时别把面板撑到无限长 */
-.picks { max-height: 148px; overflow-y: auto; padding-right: 2px; }
+.picks { max-height: 240px; overflow-y: auto; padding-right: 2px; }
 .picks::-webkit-scrollbar { width: 4px; }
 .picks::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }

@@ -4,15 +4,20 @@ import android.content.ContentResolver;
 import android.content.ContentUris;
 import android.content.Context;
 import android.database.Cursor;
+import android.graphics.Bitmap;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
+import android.os.Build;
 import android.provider.MediaStore;
+import android.util.Base64;
+import android.util.Size;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -222,23 +227,39 @@ public final class AutoSync {
         return base + sub;
     }
 
-    /** 系统相册清单：给设置面板勾选用；count 是该相册里的图片+视频数量。 */
+    /**
+     * 系统相册清单：给设置面板勾选用；count 是该相册里的图片+视频数量。
+     * 每个相册就是一个 MediaStore bucket，也就是手机里的一个文件夹，所以顺便把
+     * 真实文件夹路径（DCIM/Camera 这类）和 112px 封面一起返回，选的时候不容易认错。
+     */
     public static String albumsJson(Context ctx) {
         Map<String, Integer> count = new HashMap<>();
+        Map<String, long[]> cover = new HashMap<>();  // album -> {mediaId, video?1:0}
+        Map<String, String> folders = new HashMap<>();
+        boolean hasRelative = Build.VERSION.SDK_INT >= 29;
         String[] tables = {"images", "video"};
         for (String t : tables) {
-            Uri table = "images".equals(t)
-                    ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-                    : MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
+            boolean video = "video".equals(t);
+            Uri table = video
+                    ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                    : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
             Cursor c = null;
             try {
-                c = ctx.getContentResolver().query(table,
-                        new String[]{"bucket_display_name", "bucket_id", MediaStore.MediaColumns.SIZE},
+                String[] proj = hasRelative
+                        ? new String[]{"bucket_display_name", "bucket_id", MediaStore.MediaColumns._ID,
+                        MediaStore.MediaColumns.SIZE, MediaStore.MediaColumns.RELATIVE_PATH,
+                        MediaStore.MediaColumns.DATA}
+                        : new String[]{"bucket_display_name", "bucket_id", MediaStore.MediaColumns._ID,
+                        MediaStore.MediaColumns.SIZE, MediaStore.MediaColumns.DATA};
+                c = ctx.getContentResolver().query(table, proj,
                         null, null, MediaStore.MediaColumns.DATE_MODIFIED + " DESC");
                 if (c == null) continue;
                 int bkI = c.getColumnIndex("bucket_display_name");
                 int bkIdI = c.getColumnIndex("bucket_id");
+                int idI = c.getColumnIndex(MediaStore.MediaColumns._ID);
                 int sizeI = c.getColumnIndex(MediaStore.MediaColumns.SIZE);
+                int relI = c.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH);
+                int dataI = c.getColumnIndex(MediaStore.MediaColumns.DATA);
                 int rows = 0;
                 while (c.moveToNext() && rows++ < 20000) {
                     if (sizeI >= 0 && c.getLong(sizeI) <= 0) continue;
@@ -249,6 +270,15 @@ public final class AutoSync {
                     album = safeName(album);
                     Integer n = count.get(album);
                     count.put(album, n == null ? 1 : n + 1);
+                    // 按 DATE_MODIFIED 倒序扫，第一条就是最新的一张，拿来当封面
+                    if (!cover.containsKey(album) && idI >= 0) {
+                        cover.put(album, new long[]{c.getLong(idI), video ? 1 : 0});
+                    }
+                    if (!folders.containsKey(album)) {
+                        String folder = folderOf(relI >= 0 ? c.getString(relI) : null);
+                        if (folder.isEmpty() && dataI >= 0) folder = folderOf(c.getString(dataI));
+                        if (!folder.isEmpty()) folders.put(album, folder);
+                    }
                 }
             } catch (Exception ignore) {
             } finally {
@@ -258,16 +288,80 @@ public final class AutoSync {
         List<Map.Entry<String, Integer>> list = new ArrayList<>(count.entrySet());
         list.sort((a, b) -> b.getValue() - a.getValue());
         JSONArray arr = new JSONArray();
+        int withCover = 0;
         for (Map.Entry<String, Integer> e : list) {
             JSONObject o = new JSONObject();
             try {
                 o.put("name", e.getKey());
                 o.put("count", e.getValue());
+                String folder = folders.get(e.getKey());
+                if (folder != null && !folder.isEmpty()) o.put("path", folder);
+                long[] cv = cover.get(e.getKey());
+                // 封面最多做 24 个：再多会让“打开设置”明显变慢，超出的用文件夹图标
+                if (cv != null && withCover < 24) {
+                    String data = thumbData(ctx, cv[0], cv[1] == 1);
+                    if (!data.isEmpty()) {
+                        o.put("cover", data);
+                        withCover++;
+                    }
+                }
                 arr.put(o);
             } catch (Exception ignore) {
             }
         }
         return arr.toString();
+    }
+
+    /** 把 RELATIVE_PATH / DATA 统一成「DCIM/Camera」这种相对文件夹。 */
+    private static String folderOf(String raw) {
+        if (raw == null) return "";
+        String p = raw.trim();
+        if (p.isEmpty()) return "";
+        int i = p.indexOf("/storage/emulated/0/");
+        if (i >= 0) p = p.substring(i + "/storage/emulated/0/".length());
+        if (p.startsWith("/")) p = p.substring(1);
+        if (p.endsWith("/")) return p.substring(0, p.length() - 1);
+        int slash = p.lastIndexOf('/');
+        return slash > 0 ? p.substring(0, slash) : "";
+    }
+
+    /** 取一张 112px 方图当封面；失败返回空串，前端退回文件夹图标。 */
+    private static String thumbData(Context ctx, long id, boolean video) {
+        Bitmap bmp = null;
+        Bitmap square = null;
+        try {
+            Uri uri = ContentUris.withAppendedId(video
+                    ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                    : MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id);
+            if (Build.VERSION.SDK_INT >= 29) {
+                bmp = ctx.getContentResolver().loadThumbnail(uri, new Size(112, 112), null);
+            } else if (video) {
+                bmp = MediaStore.Video.Thumbnails.getThumbnail(ctx.getContentResolver(), id,
+                        MediaStore.Video.Thumbnails.MINI_KIND, null);
+            } else {
+                bmp = MediaStore.Images.Thumbnails.getThumbnail(ctx.getContentResolver(), id,
+                        MediaStore.Images.Thumbnails.MINI_KIND, null);
+            }
+            if (bmp == null) return "";
+            int w = bmp.getWidth(), h = bmp.getHeight();
+            int side = Math.min(w, h);
+            square = Bitmap.createBitmap(bmp, (w - side) / 2, (h - side) / 2, side, side);
+            if (square.getWidth() != 112) {
+                Bitmap scaled = Bitmap.createScaledBitmap(square, 112, 112, true);
+                if (scaled != square) {
+                    square.recycle();
+                    square = scaled;
+                }
+            }
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            square.compress(Bitmap.CompressFormat.JPEG, 72, out);
+            return "data:image/jpeg;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP);
+        } catch (Throwable ignore) {
+            return "";
+        } finally {
+            if (square != null && square != bmp) square.recycle();
+            if (bmp != null) bmp.recycle();
+        }
     }
 
     /** 已勾选的相册（空 = 全部）。 */

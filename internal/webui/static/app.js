@@ -1382,7 +1382,13 @@ function renderAlbumPicks(selected) {
     const on = albumSelected.includes(a.name);
     const b = document.createElement("button");
     b.className = "pick tap" + (on ? " on" : "");
-    b.innerHTML = `<span class="tick">${on ? "✓" : "○"}</span><span>${escapeHtml(a.name)}</span><span class="n">${a.count}</span>`;
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    const sub = [a.path, a.count + " 项"].filter(Boolean).map(escapeHtml).join(" · ");
+    b.innerHTML =
+      `<span class="pick-cover">${a.cover ? `<img src="${a.cover}" alt="">` : `<span class="pick-ph">📁</span>`}</span>` +
+      `<span class="pick-txt"><span class="pick-name">${escapeHtml(a.name)}</span>` +
+      `<span class="pick-sub">${sub}</span></span>` +
+      `<span class="tick">✓</span>`;
     b.addEventListener("click", () => {
       const i = albumSelected.indexOf(a.name);
       if (i >= 0) albumSelected.splice(i, 1);
