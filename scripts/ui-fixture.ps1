@@ -16,13 +16,14 @@ New-Item -ItemType Directory -Force -Path "$root\cloud", "$root\home", "$root\sa
 
 # 1) 云端替身
 Start-Process -FilePath $rclone -WindowStyle Hidden -ArgumentList @(
-  'serve', 'webdav', "$root\cloud", '--addr', "127.0.0.1:$davPort", '--user', $user, '--pass', $pass, '--log-level', 'ERROR'
+  'serve', 'webdav', "$root\cloud", '--addr', "127.0.0.1:$davPort", '--user', $user, '--pass', $pass, '--baseurl', '/dav', '--log-level', 'ERROR'
 ) | Out-Null
 Start-Sleep -Seconds 2
 
 # 2) PC 端 vaultd（第一次运行自己生成 master_key / salt），把样本加密传上去
 $env:VAULTD_HOME = "$root\home"
 $seed = [ordered]@{
+  backend     = 'webdav'
   webdav_url  = "http://127.0.0.1:$davPort/dav"
   webdav_user = $user
   webdav_pass = $pass
@@ -76,6 +77,7 @@ foreach ($f in Get-ChildItem "$root\samples") {
 # 5) 设备配置：同一把钥匙 + 指向宿主机 DAV
 $cfg = Get-Content "$root\home\config.json" -Raw | ConvertFrom-Json
 $dev = [ordered]@{
+  backend     = 'webdav'
   webdav_url  = "http://10.0.2.2:$davPort/dav"
   webdav_user = $user
   webdav_pass = $pass

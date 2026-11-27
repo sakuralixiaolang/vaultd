@@ -6,6 +6,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -44,10 +45,12 @@ type Server struct {
 	// ready 在首次建立密文库连接后关闭。网关先开始监听、先吐前端，
 	// 需要云端数据的接口再等它，冷启动就不用卡在“连云端”上。
 	ready chan struct{}
+
+	cache *previewCache
 }
 
 func New(cfg *localcfg.Config, token string) *Server {
-	s := &Server{cfg: cfg, token: token, ready: make(chan struct{})}
+	s := &Server{cfg: cfg, token: token, ready: make(chan struct{}), cache: newPreviewCache(cfg.MasterKey)}
 	go func() {
 		s.reload(context.Background())
 		close(s.ready)
@@ -113,6 +116,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/api/setup", s.guard(s.handleSetup))
 	mux.HandleFunc("/api/delete", s.guard(s.handleDelete))
 	mux.HandleFunc("/api/mkdir", s.guard(s.handleMkdir))
+	mux.HandleFunc("/api/move", s.guard(s.handleMove))
+	mux.HandleFunc("/api/cache/status", s.guard(s.handleCacheStatus))
+	mux.HandleFunc("/api/cache/clear", s.guard(s.handleCacheClear))
 	mux.HandleFunc("/api/config/export", s.guard(s.handleConfigExport))
 	mux.HandleFunc("/api/config/import", s.guard(s.handleConfigImport))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
@@ -327,11 +333,32 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	case rangeNone:
 		h.Set("Content-Length", strconv.FormatInt(size, 10))
 		w.WriteHeader(http.StatusOK)
+		// 图片原图才缓存：视频有 Range、下载有 dl=1，都不该把整段塞进内存。
+		// 缓存本身是 AES-GCM 加密落盘，HTTP 仍然是 no-store，WebView 拿不到明文副本。
+		cacheable := s.cache != nil && r.Method == http.MethodGet &&
+			r.URL.Query().Get("dl") != "1" && isPreviewImage(remote) && size <= previewCacheMaxFile
+		var key string
+		if cacheable {
+			key = previewKey(remote, size, o.ModTime(ctx))
+			if plain, ok := s.cache.get(key); ok {
+				_, _ = w.Write(plain)
+				return
+			}
+		}
 		rc, err := v.OpenFull(ctx, remote)
 		if err != nil {
 			return
 		}
 		defer rc.Close()
+		if cacheable {
+			buf := bytes.NewBuffer(make([]byte, 0, size))
+			_, err := io.Copy(io.MultiWriter(w, buf), rc)
+			if err == nil && int64(buf.Len()) == size {
+				data := buf.Bytes()
+				go s.cache.put(key, data)
+			}
+			return
+		}
 		_, _ = io.Copy(w, rc)
 		return
 	}
@@ -394,6 +421,74 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "path": "/" + p})
+}
+
+// handleMove 移动/重命名文件或目录。跨目录走 139 的 batchMove，
+// 不重新下载上传；云端任务是异步的，dav 层会等目标出现再返回。
+// 大目录仍可能较慢，所以超时给到 30 分钟；前端逐个调用并显示进度。
+func (s *Server) handleMove(w http.ResponseWriter, r *http.Request) {
+	s.waitReady(r.Context())
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	v, err := s.needVault()
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		writeErr(w, errors.New("请求格式必须是 JSON"))
+		return
+	}
+	var req struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	if err := dec.Decode(&req); err != nil {
+		writeErr(w, errors.New("移动参数不完整"))
+		return
+	}
+	if strings.TrimSpace(req.From) == "" || strings.TrimSpace(req.To) == "" {
+		writeErr(w, errors.New("移动参数不完整"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	defer cancel()
+	if err := v.Move(ctx, req.From, req.To); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "from": req.From, "to": req.To})
+}
+
+func (s *Server) handleCacheStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var used, files, limit int64
+	if s.cache != nil {
+		used, files, limit = s.cache.stats()
+	}
+	writeJSON(w, map[string]any{"enabled": s.cache != nil, "bytes": used, "files": files, "limit": limit})
+}
+
+func (s *Server) handleCacheClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cache == nil {
+		writeJSON(w, map[string]any{"ok": true})
+		return
+	}
+	if err := s.cache.clear(); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 type setupReq struct {

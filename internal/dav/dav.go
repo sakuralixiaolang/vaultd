@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -254,11 +255,11 @@ type davProp struct {
 }
 
 type davInner struct {
-	DisplayName  string  `xml:"displayname"`
-	ContentLength string `xml:"getcontentlength,omitempty"`
-	LastModified string  `xml:"getlastmodified,omitempty"`
-	ContentType  string  `xml:"getcontenttype,omitempty"`
-	ResourceType resType `xml:"resourcetype"`
+	DisplayName   string  `xml:"displayname"`
+	ContentLength string  `xml:"getcontentlength,omitempty"`
+	LastModified  string  `xml:"getlastmodified,omitempty"`
+	ContentType   string  `xml:"getcontenttype,omitempty"`
+	ResourceType  resType `xml:"resourcetype"`
 }
 
 type resType struct {
@@ -266,8 +267,8 @@ type resType struct {
 }
 
 type davResponse struct {
-	Href     string   `xml:"href"`
-	Propstat davProp  `xml:"propstat"`
+	Href     string  `xml:"href"`
+	Propstat davProp `xml:"propstat"`
 }
 
 type multiStatus struct {
@@ -418,8 +419,9 @@ func (s *Server) get(ctx context.Context, w http.ResponseWriter, r *http.Request
 	_, _ = io.Copy(w, resp.Body)
 }
 
-// move 只支持同目录改名（云端提供 /file/update）；跨目录移动交回 501，
-// 上层（chunker）在这种拓扑下只会做原地改名。
+// move 支持同目录改名和跨目录移动。跨目录走 139 的 /file/batchMove：
+// 文件与整个目录都能一次搬走，不需要「读出来再重新上传」。
+// 目标名字不同时先改名再移动；失败时最多停在源目录的新名字上，内容不会丢。
 func (s *Server) move(ctx context.Context, w http.ResponseWriter, r *http.Request, p string) {
 	dest := r.Header.Get("Destination")
 	if dest == "" {
@@ -433,25 +435,62 @@ func (s *Server) move(ctx context.Context, w http.ResponseWriter, r *http.Reques
 	}
 	srcDir := parent(p)
 	dstDir := parent(du.Path)
-	if srcDir != dstDir {
-		http.Error(w, "跨目录移动未实现", http.StatusNotImplemented)
-		return
-	}
-	id, isDir, err := s.resolve(ctx, p)
+	id, _, err := s.resolve(ctx, p)
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	if isDir {
-		http.Error(w, "目录移动未实现", http.StatusNotImplemented)
+	dstName := lastSegment(du.Path)
+	if dstName == "" {
+		http.Error(w, "目标名为空", http.StatusBadRequest)
 		return
 	}
-	if err := s.c.Rename(ctx, id, lastSegment(du.Path)); err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
+	if dstName != lastSegment(p) {
+		if err := s.c.Rename(ctx, id, dstName); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+	}
+	if srcDir != dstDir {
+		s.invalidate(dstDir)
+		dstParent, isDir, err := s.resolve(ctx, dstDir)
+		if err != nil || !isDir {
+			http.Error(w, "目标目录不存在", http.StatusConflict)
+			return
+		}
+		if _, err := s.c.Move(ctx, []string{id}, dstParent); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		// 139 的 batchMove 是任务型接口：必须等目标真正出现在列表里再返回 201，
+		// 否则 rclone 会立刻 NewObject 校验失败，甚至把源当成没搬走。
+		if err := s.waitMove(ctx, du.Path, 25*time.Second); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		s.invalidate(dstDir)
 	}
 	s.invalidate(srcDir)
 	w.WriteHeader(http.StatusCreated)
+}
+
+func (s *Server) waitMove(ctx context.Context, dest string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	dir := parent(dest)
+	for {
+		s.invalidate(dir)
+		if _, _, err := s.resolve(ctx, dest); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New("云端移动任务超时，目标还没出现")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
 }
 
 func (s *Server) put(ctx context.Context, w http.ResponseWriter, r *http.Request, p string) {

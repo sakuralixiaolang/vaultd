@@ -18,6 +18,9 @@ const state = {
   limit: 80, // 一屏先画这么多，剩下的滚到底再追加，几百个文件也不卡
   showDel: localStorage.getItem("vaultd.showDel") === "1", // 默认藏起 ×，防误删
   viewer: { items: [], index: -1, zoom: false },
+  navSeq: 0, // 目录请求序号：连续点目录时，只让最后一次请求上屏
+  selecting: false,
+  selected: new Set(),
 };
 document.body.classList.toggle("show-del", state.showDel);
 const $ = (id) => document.getElementById(id);
@@ -57,9 +60,32 @@ function applyTheme(t, remember) {
   }
 }
 applyTheme(savedTheme() || systemTheme(), false);
+function themeMode() {
+  return savedTheme() || "auto";
+}
+function renderThemeMode() {
+  const m = themeMode();
+  const map = { auto: "btnThemeAuto", dark: "btnThemeDark", light: "btnThemeLight" };
+  Object.keys(map).forEach((k) => {
+    const b = $(map[k]);
+    if (b) b.classList.toggle("on", m === k);
+  });
+}
+function setThemeMode(m) {
+  try {
+    if (m === "auto") localStorage.removeItem(THEME_KEY);
+    else localStorage.setItem(THEME_KEY, m);
+  } catch (e) { /* 隐私模式可能禁用存储，忽略 */ }
+  if (m === "auto" && window.Sync && Sync.setTheme) {
+    try { Sync.setTheme(""); } catch (e) {}
+  }
+  applyTheme(m === "auto" ? systemTheme() : m, m !== "auto");
+  renderThemeMode();
+}
 // 原生侧改了系统深浅色（Activity 不重建）时回调这里：只有用户没手动选过才跟随。
 window.vaultdThemeFromSystem = () => {
   if (!savedTheme()) applyTheme(systemTheme(), false);
+  renderThemeMode();
   return document.documentElement.dataset.theme;
 };
 
@@ -105,6 +131,28 @@ function whenNear(el, fn) {
   nearObserver.observe(el);
 }
 const joinPath = (dir, name) => "/" + [dir.replace(/\/+$/, ""), name].filter(Boolean).join("/").replace(/^\/+/, "");
+const parentOf = (p) => {
+  const s = String(p || "").replace(/^\/+|\/+$/g, "");
+  const i = s.lastIndexOf("/");
+  return i < 0 ? "" : "/" + s.slice(0, i);
+};
+const baseOf = (p) => String(p || "").replace(/^\/+|\/+$/g, "").split("/").pop();
+const normDir = (p) => String(p || "").replace(/^\/+|\/+$/g, "");
+const sameDir = (a, b) => normDir(a) === normDir(b);
+
+let busyDepth = 0;
+function showBusy(text) {
+  busyDepth++;
+  $("busyText").textContent = text || "正在处理…";
+  $("busy").classList.remove("hidden");
+}
+function setBusy(text) {
+  $("busyText").textContent = text || "正在处理…";
+}
+function hideBusy() {
+  busyDepth = Math.max(0, busyDepth - 1);
+  if (!busyDepth) $("busy").classList.add("hidden");
+}
 
 // ---------- 跨启动缓存：列表 + 上次目录 + 滚动位置 ----------
 // 网关端口现在是固定的，localStorage 才能真的留住；这样冷启动先拿旧列表画一屏，
@@ -170,9 +218,21 @@ function restoreScroll() {
 }
 
 // 进目录统一走这里：先记住当前滚动位置，再记住目录，回来时原样恢复。
-function goTo(dir) {
+function goTo(dir, opts) {
+  const bypass = !!(opts && opts.bypass);
+  if (!bypass && isPrivatePath(dir) && !folderUnlocked) {
+    if (!$("lockScreen").classList.contains("hidden")) return;
+    showLock("folder", "进入「" + baseOf(lockInfo.folder_path) + "」需要验证").then((ok) => {
+      if (!ok) return;
+      folderUnlocked = true;
+      goTo(dir, { bypass: true });
+    });
+    return;
+  }
+  if (folderUnlocked && !isPrivatePath(dir)) folderUnlocked = false;
   saveScroll();
   state.cwd = dir || "";
+  state.navSeq++;
   state.pendingScroll = true;
   saveCwd();
   loadList().catch((err) => toast("打开目录失败：" + err.message));
@@ -192,7 +252,10 @@ let askResolve = null;
 function askOpen(text, yesLabel, withInput, initValue) {
   const box = $("ask");
   $("askText").textContent = text;
-  $("askYes").textContent = yesLabel;
+  const yesBtn = $("askYes");
+  yesBtn.textContent = yesLabel;
+  yesBtn.classList.toggle("danger", yesLabel === "删除");
+  yesBtn.classList.toggle("primary", yesLabel !== "删除");
   const inp = $("askInput");
   inp.classList.toggle("hidden", !withInput);
   if (withInput) {
@@ -208,8 +271,8 @@ function askOpen(text, yesLabel, withInput, initValue) {
 function askDelete(name) {
   return askOpen("删除「" + name + "」？这个操作不能撤销。", "删除", false, "");
 }
-function askInput(text, value) {
-  return askOpen(text, "确定", true, value);
+function askInput(text, value, yesLabel) {
+  return askOpen(text, yesLabel || "确定", true, value);
 }
 (function bindAsk() {
   const done = (ok) => {
@@ -250,7 +313,8 @@ function bindLongPress(el, entry) {
       timer = null;
       el.classList.remove("pressing");
       el.__lp = true; // 长按已经处理过了，抬起时别再当成一次点击
-      removeEntry(entry);
+      if (state.selecting) toggleSelected(entry);
+      else removeEntry(entry);
     }, 600);
   });
   el.addEventListener("click", (ev) => {
@@ -293,11 +357,34 @@ async function loadStatus() {
 function applyStatus(s) {
   state.configured = s.configured;
   state.vaultReady = !!s.vault_ready;
-  $("keyfp").textContent = s.key_fingerprint ? "密钥 " + s.key_fingerprint + "…" : "";
+  $("keyfp").textContent = s.key_fingerprint ? "密钥指纹 " + s.key_fingerprint + "…" : "还没有配置密钥";
   const dot = $("health");
   dot.className = "dot " + (s.vault_ready ? "ok" : s.configured ? "err" : "");
-  $("setupPanel").classList.toggle("hidden", !state.setupTouched && !!s.configured && !!s.vault_ready);
+  // 顶栏只留一句人话状态，细节放设置里的「云端连接」
+  const stText = $("statusText");
+  if (stText) {
+    stText.textContent = s.vault_ready ? "已连接" : s.configured ? "连接失败" : "未接入";
+    stText.className = "status-pill " + (s.vault_ready ? "ok" : s.configured ? "err" : "");
+  }
+  const connLine = $("connLine");
+  if (connLine) {
+    const modeName = (s.backend || "").indexOf("内置") === 0 ? "中国移动云盘（内置直连）" : (s.backend || "未选择方式");
+    connLine.textContent = modeName + (s.configured ? " · 配置已保存" : " · 还没有配置");
+  }
+  const connBadge = $("connBadge");
+  if (connBadge) {
+    connBadge.textContent = s.vault_ready ? "已连接" : s.configured ? "连接失败" : "未接入";
+    connBadge.className = "badge " + (s.vault_ready ? "ok" : s.configured ? "err" : "");
+  }
+  // 没配好或连不上时自动打开设置；用户手动开过之后就尊重他的选择，不再抢焦点
+  if (!state.setupTouched) {
+    const needSetup = !s.configured || !s.vault_ready;
+    $("setupPanel").classList.toggle("hidden", !needSetup);
+    if (needSetup) setTab("connect");
+  }
+  syncModalState();
   if (s.vault_error) $("setupMsg").textContent = "连接失败：" + s.vault_error;
+
 
   // 接入方式：全新设备（还没配置）默认就是内置直连；老的外部 WebDAV 配置则沿用 WebDAV。
   // 用户可以在设置面板里手动切换，切换只影响表单展示，保存哪个表单就写哪种 backend。
@@ -324,6 +411,7 @@ function applyStatus(s) {
 
 function applyEntries(entries, serverPath) {
   if (!window.__firstListAt) window.__firstListAt = Math.round(performance.now());
+  state.shownDir = state.cwd; // 界面此刻真正显示的目录，请求失败时回退到它
   state.entries = entries || [];
   showPath(serverPath || "/");
   $("btnUp").disabled = state.cwd === "";
@@ -331,33 +419,46 @@ function applyEntries(entries, serverPath) {
   refreshTargetOptions();
   renderList();
   restoreScroll();
+  if ($("setupPanel") && !$("setupPanel").classList.contains("hidden")) renderSetupFiles();
 }
 
 async function loadList(opts) {
   const force = !!(opts && opts.force);
   const quiet = !!(opts && opts.quiet);
-  const cached = state.cache[state.cwd];
+  const dir = state.cwd;
+  const seq = state.navSeq;
+  const cached = state.cache[dir];
   const fresh = cached && Date.now() - (cached.at || 0) < 8000;
   // 有缓存就先画：新到 8 秒内的直接用；更旧的在后台悄悄刷新，页面不空等。
   if (!force && cached && (fresh || (opts && opts.stale))) {
+    if (seq !== state.navSeq || dir !== state.cwd) return;
     applyEntries(cached.entries, cached.path);
     if (!fresh) refreshListInBackground();
     return;
   }
   let r;
   try {
-    r = await api("/api/list?path=" + encodeURIComponent(state.cwd));
+    r = await api("/api/list?path=" + encodeURIComponent(dir));
   } catch (err) {
+    // 只有还是当前目录时才允许回退；已经离开的旧请求失败不要再把页面掳回根目录。
+    if (seq !== state.navSeq || dir !== state.cwd) return;
     // 上次记的目录已经没了（被删/改过名）：退回根目录再来一次，而不是卡在报错上。
-    if (state.cwd) {
+    // 只有「目录真的不存在」才退回根目录；网络抖动/超时留在原目录，别把人掳走。
+    if (err.code === "NOTFOUND" && dir) {
       state.cwd = "";
+      state.navSeq++;
       saveCwd();
       return loadList({ force: true, quiet });
     }
+    state.cwd = state.shownDir || "";
+    state.navSeq++;
+    saveCwd();
     throw err;
   }
-  state.cache[state.cwd] = { at: Date.now(), entries: r.entries || [], path: r.path || "/" };
-  applyEntries(state.cache[state.cwd].entries, r.path);
+  // 连续点目录时，前面慢的请求可能后到；一律丢弃，别覆盖已经打开的层级。
+  if (seq !== state.navSeq || dir !== state.cwd) return;
+  state.cache[dir] = { at: Date.now(), entries: r.entries || [], path: r.path || "/" };
+  applyEntries(state.cache[dir].entries, r.path);
   saveDiskCache();
   saveCwd();
   // 列表既然拉到了，说明后台自己连上了；把状态与错误面板同步过来，
@@ -491,14 +592,14 @@ function renderList(force) {
       <p>${filtered ? "这个分类下还没有文件" : "这里是空的，可以上传照片、视频或任意文件"}</p>
       <button class="primary tap" id="btnEmptyUp">${filtered ? "上传到当前目录" : "上传第一个文件"}</button>`;
     box.appendChild(empty);
-    $("btnEmptyUp").addEventListener("click", () => $("fileInput").click());
+    $("btnEmptyUp").addEventListener("click", () => openUpload(true));
     return;
   }
   const frag = document.createDocumentFragment();
   const lk = state.cwd + "#" + state.view + "#" + state.sort + "#" + state.filter;
   if (state.limitFor !== lk) {
     state.limitFor = lk;
-    state.limit = 80;
+    state.limit = state.selecting ? shown.length : 80;
   }
   for (const e of shown.slice(0, state.limit)) {
     frag.appendChild(state.view === "grid" ? tileEl(e) : rowEl(e));
@@ -588,6 +689,22 @@ function kindGlyph(name) {
     default: return "📄";
   }
 }
+// 网格里用单色线性图标，和深色面板保持一致；列表行仍沿用轻量字符图标。
+const TILE_SVG = {
+  folder: '<path d="M3 7.5A2 2 0 0 1 5 5.5h3.6l1.7 2H19a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
+  image: '<rect x="3" y="4.5" width="18" height="15" rx="2.5"/><circle cx="8.2" cy="9.6" r="1.6"/><path d="M4 17.2l4.6-4.2 3.3 3 2.7-2.3L20 17.8"/>',
+  video: '<rect x="3" y="5.5" width="18" height="13" rx="2.5"/><path d="M10.4 9.4l4.2 2.6-4.2 2.6z"/>',
+  audio: '<path d="M9 17.5V8.2l8-1.7v8.6"/><circle cx="6.8" cy="17.5" r="2.2"/><circle cx="14.8" cy="15.6" r="2.2"/>',
+  doc: '<path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4"/><path d="M9 12h6M9 15.5h6"/>',
+  archive: '<path d="M4 7.5h16v12h-16z"/><path d="M4 7.5l2-3h12l2 3"/><path d="M9.5 11h5"/>',
+  code: '<path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4"/><path d="M9.8 12l-1.8 1.9 1.8 1.9M14.2 12l1.8 1.9-1.8 1.9"/>',
+  pkg: '<path d="M4 8l4-3h8l4 3v10H4z"/><path d="M4 8h16M12 8v10"/>',
+  file: '<path d="M6.5 3.5h7l4 4v13h-11z"/><path d="M13.5 3.5v4h4"/>'
+};
+function svgIcon(kind) {
+  const d = TILE_SVG[kind] || TILE_SVG.file;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+}
 function matchesFilter(e) {
   if (state.filter === "all") return true;
   if (e.dir) return false;
@@ -676,18 +793,20 @@ function tileEl(e) {
   let ph = "";
   let badge = "";
   if (e.dir) {
-    ph = `<div class="tile-ph dir"><span class="glyph">📁</span></div>`;
+    ph = `<div class="tile-ph dir"><span class="glyph">${svgIcon("folder")}</span></div>`;
   } else if (isImage(e.name)) {
-    ph = `<div class="tile-ph"><span class="glyph">${fallbackGlyph(e.name)}</span></div>`;
+    ph = `<div class="tile-ph"><span class="glyph">${svgIcon("image")}</span></div>`;
   } else {
     const kind = isVideo(e.name) ? "video" : isAudio(e.name) ? "audio" : fileKind(e.name);
-    ph = `<div class="tile-ph ${kind}"><span class="glyph">${kindGlyph(e.name)}</span></div>`;
+    ph = `<div class="tile-ph ${kind}"><span class="glyph">${svgIcon(kind)}</span></div>`;
     badge = `<span class="tile-badge ${kind}">${escapeHtml(extOf(e.name).toUpperCase() || "FILE")}</span>`;
   }
   el.innerHTML = `${ph}${badge}
+    <span class="sel-mark"></span>
     <button class="kill" title="删除">✕</button>
     <div class="tile-meta"><div class="tile-name">${escapeHtml(e.name)}</div>
     <div class="tile-size">${e.dir ? "文件夹" : fmtSize(e.size) + (e.mod_time ? " · " + fmtDay(e.mod_time) : "")}</div></div>`;
+  paintPick(el, e);
   if (isImage(e.name)) {
     // 缩略图等滚到附近再请求：一屏几十个格子同时解码会把手机卡住。
     const img = new Image();
@@ -706,9 +825,13 @@ function tileEl(e) {
   }
   el.addEventListener("click", (ev) => {
     if (ev.target.classList.contains("kill")) return;
-    e.dir ? openDir(e.name) : openViewer(e);
+    if (state.selecting) { toggleSelected(e); return; }
+    e.dir ? goTo(e.path) : openViewer(e);
   });
-  el.querySelector(".kill").addEventListener("click", (ev) => { ev.stopPropagation(); removeEntry(e); });
+  el.querySelector(".kill").addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    if (!state.selecting) removeEntry(e);
+  });
   bindLongPress(el, e);
   return el;
 }
@@ -716,25 +839,503 @@ function tileEl(e) {
 function rowEl(e) {
   const el = document.createElement("div");
   el.className = "item";
-  let thumb = `<span>${e.dir ? "📁" : fallbackGlyph(e.name)}</span>`;
+  const rowKind = e.dir ? "folder" : isVideo(e.name) ? "video" : isAudio(e.name) ? "audio" : isImage(e.name) ? "image" : fileKind(e.name);
+  let thumb = `<span>${svgIcon(rowKind)}</span>`;
   if (!e.dir && isImage(e.name)) {
     thumb = `<img loading="lazy" decoding="async" src="${thumbURL(e, 120)}" alt="">`;
   }
-  el.innerHTML = `<div class="thumb">${thumb}</div>
+  el.innerHTML = `<span class="sel-mark"></span><div class="thumb">${thumb}</div>
     <div class="txt"><div class="name">${escapeHtml(e.name)}</div>
     <div class="sub">${e.dir ? "文件夹" : KIND_LABEL[isImage(e.name) ? "image" : isVideo(e.name) ? "video" : isAudio(e.name) ? "audio" : fileKind(e.name)] + " · " + fmtSize(e.size) + (e.mod_time ? " · " + fmtDate(e.mod_time) : "")}</div></div>
     <button class="del ghost" title="删除">✕</button>`;
+  paintPick(el, e);
   const img = el.querySelector(".thumb img");
-  if (img) img.addEventListener("error", () => { el.querySelector(".thumb").textContent = fallbackGlyph(e.name); });
+  if (img) img.addEventListener("error", () => { el.querySelector(".thumb").innerHTML = svgIcon("image"); });
   if (!e.dir && isVideo(e.name)) whenNear(el, () => attachVideoThumb(el.querySelector(".thumb"), e, "row-vid"));
   el.addEventListener("click", (ev) => {
     if (ev.target.classList.contains("del")) return;
-    e.dir ? openDir(e.name) : openViewer(e);
+    if (state.selecting) { toggleSelected(e); return; }
+    e.dir ? goTo(e.path) : openViewer(e);
   });
-  el.querySelector(".del").addEventListener("click", (ev) => { ev.stopPropagation(); removeEntry(e); });
+  el.querySelector(".del").addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    if (!state.selecting) removeEntry(e);
+  });
   bindLongPress(el, e);
   return el;
 }
+
+function selectedEntries() {
+  return state.entries.filter((e) => state.selected.has(e.path));
+}
+
+function paintPick(el, e) {
+  el.dataset.path = e.path;
+  el.classList.toggle("selected", state.selected.has(e.path));
+  const pick = el.querySelector(".sel-mark");
+  if (pick) pick.textContent = state.selected.has(e.path) ? "✓" : "";
+}
+
+function updateSelUI() {
+  const on = state.selecting;
+  document.body.classList.toggle("selecting", on);
+  $("selBar").classList.toggle("hidden", !on);
+  $("selCount").textContent = "已选 " + state.selected.size + " 项";
+  $("btnMoveSel").disabled = !state.selected.size;
+  $("btnRenameSel").disabled = state.selected.size !== 1;
+  $("btnDeleteSel").disabled = !state.selected.size;
+  $("btnSelect").classList.toggle("on", on);
+}
+
+function enterSelect() {
+  state.selecting = true;
+  state.selected.clear();
+  state.limit = Math.max(state.limit, state.entries.length);
+  renderList(true);
+  updateSelUI();
+}
+
+function exitSelect() {
+  state.selecting = false;
+  state.selected.clear();
+  renderList(true);
+  updateSelUI();
+}
+
+function toggleSelected(e) {
+  if (state.selected.has(e.path)) state.selected.delete(e.path);
+  else state.selected.add(e.path);
+  const box = $("list");
+  box.querySelectorAll("[data-path]").forEach((el) => {
+    if (el.dataset.path === e.path) paintPick(el, e);
+  });
+  updateSelUI();
+}
+
+async function moveSelected() {
+  const items = selectedEntries();
+  if (!items.length) return;
+  const dest = await pickFolder(state.cwd, items.length === 1 ? "移动「" + items[0].name + "」" : "移动 " + items.length + " 项", "移到这里");
+  if (dest === null) return;
+  const todo = items.filter((e) => !sameDir(parentOf(e.path), dest));
+  const blocked = items.filter((e) => dest && (e.path === dest || dest.startsWith(e.path + "/")));
+  if (blocked.length) {
+    toast("不能把「" + blocked[0].name + "」移进它自己里面");
+    return;
+  }
+  if (!todo.length) {
+    toast("已经在目标文件夹里了", "ok");
+    return;
+  }
+  const fails = [];
+  showBusy("准备移动…");
+  try {
+    for (let i = 0; i < todo.length; i++) {
+      const e = todo[i];
+      setBusy(`正在移动 ${i + 1}/${todo.length}：${e.name}`);
+      const to = joinPath(dest, e.name);
+      try {
+        await api("/api/move", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ from: e.path, to }),
+        });
+      } catch (err) {
+        fails.push(e.name + "：" + err.message);
+      }
+    }
+  } finally {
+    hideBusy();
+  }
+  exitSelect();
+  await loadList({ force: true }).catch(() => {});
+  if (fails.length) toast("有 " + fails.length + " 项没移成：" + fails[0]);
+  else toast("已移动 " + todo.length + " 项", "ok");
+}
+
+async function renameSelected() {
+  const items = selectedEntries();
+  if (items.length !== 1) return;
+  const e = items[0];
+  const name = await askInput("把「" + e.name + "」改成：", e.name, "重命名");
+  if (name === null) return;
+  const trimmed = String(name).trim();
+  if (!trimmed || trimmed === e.name) return;
+  if (/[\/\\]/.test(trimmed) || trimmed === "." || trimmed === "..") {
+    toast("名称不能包含 / 或 \\");
+    return;
+  }
+  showBusy("正在重命名…");
+  try {
+    await api("/api/move", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ from: e.path, to: joinPath(parentOf(e.path), trimmed) }),
+    });
+  } catch (err) {
+    hideBusy();
+    toast("重命名失败：" + err.message);
+    return;
+  }
+  hideBusy();
+  exitSelect();
+  await loadList({ force: true }).catch(() => {});
+  toast("已改名为 " + trimmed, "ok");
+}
+
+async function deleteSelected() {
+  const items = selectedEntries();
+  if (!items.length) return;
+  if (!(await askOpen("删除选中的 " + items.length + " 项？这个操作不能撤销。", "删除", false, ""))) return;
+  const fails = [];
+  showBusy("正在删除…");
+  try {
+    for (let i = 0; i < items.length; i++) {
+      setBusy(`正在删除 ${i + 1}/${items.length}：${items[i].name}`);
+      try {
+        await api("/api/delete?path=" + encodeURIComponent(items[i].path), { method: "POST" });
+      } catch (err) {
+        fails.push(items[i].name + "：" + err.message);
+      }
+    }
+  } finally {
+    hideBusy();
+  }
+  exitSelect();
+  await loadList({ force: true }).catch(() => {});
+  if (fails.length) toast("有 " + fails.length + " 项没删成：" + fails[0]);
+  else toast("已删除 " + items.length + " 项", "ok");
+}
+
+// 目录选择器：只显示文件夹；点文件夹进入，当前层就是最终目标。
+let pickerResolve = null;
+let pickerDir = "";
+function pickFolder(start, title, okLabel) {
+  pickerDir = normDir(start);
+  $("pickerTitle").textContent = title || "移动到";
+  $("pickerOk").textContent = okLabel || "移到这里";
+  $("picker").classList.remove("hidden");
+  document.body.classList.add("picking");
+  paintPicker(pickerDir);
+  return new Promise((resolve) => { pickerResolve = resolve; });
+}
+function finishPicker(value) {
+  $("picker").classList.add("hidden");
+  document.body.classList.remove("picking");
+  const r = pickerResolve;
+  pickerResolve = null;
+  if (r) r(value);
+}
+async function paintPicker(dir) {
+  pickerDir = normDir(dir);
+  $("pickerPath").textContent = pickerDir ? "/" + pickerDir : "根目录";
+  $("pickerUp").disabled = !pickerDir;
+  const box = $("pickerList");
+  box.innerHTML = `<div class="muted picker-empty"><span class="spin"></span>正在读取…</div>`;
+  let r;
+  try {
+    r = await api("/api/list?path=" + encodeURIComponent(pickerDir));
+  } catch (err) {
+    box.innerHTML = `<div class="muted picker-empty">读取失败：${escapeHtml(err.message)}</div>`;
+    return;
+  }
+  box.innerHTML = "";
+  const dirs = (r.entries || []).filter((e) => e.dir).sort((a, b) => a.name.localeCompare(b.name, "zh"));
+  if (!dirs.length) {
+    box.innerHTML = `<div class="muted picker-empty">这里没有子文件夹，可以直接移到这里</div>`;
+    return;
+  }
+  for (const e of dirs) {
+    const row = document.createElement("button");
+    row.className = "pick-row tap";
+    row.innerHTML = `<span class="pick-ico">${svgIcon("folder")}</span><span class="pick-name">${escapeHtml(e.name)}</span><span class="pick-go">›</span>`;
+    row.addEventListener("click", () => paintPicker(e.path));
+    box.appendChild(row);
+  }
+}
+(function bindPicker() {
+  $("pickerClose").addEventListener("click", () => finishPicker(null));
+  $("pickerMask").addEventListener("click", () => finishPicker(null));
+  $("pickerUp").addEventListener("click", () => paintPicker(parentOf(pickerDir)));
+  $("pickerOk").addEventListener("click", () => finishPicker(pickerDir));
+  $("picker").addEventListener("click", (ev) => { if (ev.target === $("picker")) finishPicker(null); });
+  $("btnSelect").addEventListener("click", () => (state.selecting ? exitSelect() : enterSelect()));
+  $("btnSelDone").addEventListener("click", exitSelect);
+  $("btnMoveSel").addEventListener("click", moveSelected);
+  $("btnRenameSel").addEventListener("click", renameSelected);
+  $("btnDeleteSel").addEventListener("click", deleteSelected);
+})();
+
+// ---------- 应用锁 / 私密文件夹锁 ----------
+let lockInfo = { app_lock: false, folder_lock: false, folder_path: "", biometric: false };
+let appUnlocked = true;
+let folderUnlocked = false;
+let lockResolve = null;
+let lockKind = "app";
+let lockPulse = 0;
+let bioPending = false;
+
+function lockApi() {
+  return typeof window.Lock !== "undefined" ? window.Lock : null;
+}
+function refreshLockInfo() {
+  const api = lockApi();
+  if (!api) {
+    lockInfo = { app_lock: false, folder_lock: false, folder_path: "", biometric: false };
+    return lockInfo;
+  }
+  try {
+    lockInfo = JSON.parse(api.state());
+  } catch (e) {
+    lockInfo = { app_lock: false, folder_lock: false, folder_path: "", biometric: false };
+  }
+  return lockInfo;
+}
+function isPrivatePath(p) {
+  if (!lockInfo.folder_lock || !lockInfo.folder_path) return false;
+  const root = normDir(lockInfo.folder_path);
+  const q = normDir(p);
+  return !!root && (q === root || q.startsWith(root + "/"));
+}
+
+function finishLock(ok) {
+  $("lockScreen").classList.add("hidden");
+  $("lockPin").value = "";
+  $("lockErr").textContent = "";
+  bioPending = false;
+  $("lockBio").disabled = false;
+  $("lockBio").textContent = "指纹解锁";
+  const r = lockResolve;
+  lockResolve = null;
+  if (r) r(!!ok);
+}
+
+function showLock(kind, sub) {
+  if (!$("lockScreen").classList.contains("hidden")) return Promise.resolve(false);
+  lockKind = kind;
+  const folder = kind === "folder";
+  $("lockTitle").textContent = folder ? "私密文件夹已锁定" : "vaultd 已锁定";
+  $("lockSub").textContent = sub || (folder ? "输入文件夹 PIN，或用指纹进入" : "输入 PIN 解锁，或用指纹继续");
+  $("lockCancel").classList.toggle("hidden", !folder);
+  $("lockBio").classList.toggle("hidden", !lockInfo.biometric);
+  $("lockErr").textContent = "";
+  $("lockPin").value = "";
+  $("lockScreen").classList.remove("hidden");
+  setTimeout(() => $("lockPin").focus(), 60);
+  return new Promise((resolve) => { lockResolve = resolve; });
+}
+
+function lockTryPin() {
+  const api = lockApi();
+  if (!api) { finishLock(true); return; }
+  const pin = $("lockPin").value.trim();
+  if (!/^\d{4,8}$/.test(pin)) {
+    $("lockErr").textContent = "PIN 是 4–8 位数字";
+    return;
+  }
+  if (api.verifyPin(lockKind, pin)) {
+    finishLock(true);
+    return;
+  }
+  const card = $("lockScreen").querySelector(".lock-card");
+  card.classList.remove("lock-shake");
+  void card.offsetWidth;
+  card.classList.add("lock-shake");
+  $("lockErr").textContent = "PIN 不对，再试一次";
+  $("lockPin").select();
+}
+
+function lockTryBio() {
+  const api = lockApi();
+  if (!api || !lockInfo.biometric) return;
+  bioPending = true;
+  $("lockErr").textContent = "请按指纹…";
+  $("lockBio").disabled = true;
+  $("lockBio").textContent = "等待指纹";
+  try {
+    api.biometric(lockKind);
+  } catch (e) {
+    bioPending = false;
+    $("lockBio").disabled = false;
+    $("lockBio").textContent = "指纹解锁";
+    $("lockErr").textContent = "指纹调用失败：" + e.message;
+  }
+}
+
+window.__onBioResult = function (ok, msg) {
+  if (!bioPending) return;
+  bioPending = false;
+  $("lockBio").disabled = false;
+  $("lockBio").textContent = "指纹解锁";
+  if (ok) finishLock(true);
+  else $("lockErr").textContent = msg || "指纹没有通过";
+};
+
+(function bindLock() {
+  $("lockUnlock").addEventListener("click", lockTryPin);
+  $("lockBio").addEventListener("click", lockTryBio);
+  $("lockCancel").addEventListener("click", () => finishLock(false));
+  $("lockPin").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); lockTryPin(); }
+  });
+})();
+
+// PIN 设置框：confirm=true 时要求输入两次
+let pinResolve = null;
+function askPin(title, confirm) {
+  $("pinTitle").textContent = title || "设置 PIN";
+  $("pinInput").value = "";
+  $("pinConfirm").value = "";
+  $("pinErr").textContent = "";
+  $("pinConfirm").classList.toggle("hidden", !confirm);
+  $("pinBox").classList.remove("hidden");
+  setTimeout(() => $("pinInput").focus(), 50);
+  return new Promise((resolve) => { pinResolve = resolve; });
+}
+function finishPin(value) {
+  $("pinBox").classList.add("hidden");
+  const r = pinResolve;
+  pinResolve = null;
+  if (r) r(value);
+}
+(function bindPin() {
+  const submit = () => {
+    const a = $("pinInput").value.trim();
+    if (!/^\d{4,8}$/.test(a)) { $("pinErr").textContent = "PIN 是 4–8 位数字"; return; }
+    if (!$("pinConfirm").classList.contains("hidden") && a !== $("pinConfirm").value.trim()) {
+      $("pinErr").textContent = "两次输入不一致";
+      return;
+    }
+    finishPin(a);
+  };
+  $("pinYes").addEventListener("click", submit);
+  $("pinNo").addEventListener("click", () => finishPin(null));
+  $("pinInput").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); if (!$("pinConfirm").classList.contains("hidden")) $("pinConfirm").focus(); else submit(); }
+  });
+  $("pinConfirm").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); submit(); }
+  });
+  $("pinBox").addEventListener("click", (ev) => { if (ev.target === $("pinBox")) finishPin(null); });
+})();
+
+function paintSecurityUI() {
+  const api = lockApi();
+  const app = !!lockInfo.app_lock;
+  const folder = !!lockInfo.folder_lock;
+  $("appLockBadge").textContent = app ? "已开启" : "未开启";
+  $("appLockBadge").className = "badge " + (app ? "ok" : "");
+  $("btnAppLock").textContent = app ? "关闭应用锁" : "开启应用锁";
+  $("btnAppLock").classList.toggle("danger", app);
+  $("btnAppLock").classList.toggle("primary", !app);
+  $("folderLockBadge").textContent = folder ? "已开启" : "未开启";
+  $("folderLockBadge").className = "badge " + (folder ? "ok" : "");
+  $("btnFolderLock").textContent = folder ? "关闭文件夹锁" : "开启文件夹锁";
+  $("btnFolderLock").classList.toggle("danger", folder);
+  $("btnFolderLock").classList.toggle("primary", !folder);
+  $("folderLockPath").textContent = lockInfo.folder_path || "还没有选择";
+  $("appLockMsg").textContent = api
+    ? (lockInfo.biometric ? "PIN + 指纹：这台设备可用指纹。" : "PIN 已保存在本机；这台设备没有可用的指纹，只能用 PIN。")
+    : "只有安卓 App 支持应用锁；当前是浏览器页面。";
+}
+
+async function toggleAppLock() {
+  const api = lockApi();
+  if (!api) { toast("只有安卓 App 支持应用锁"); return; }
+  if (lockInfo.app_lock) {
+    if (!(await askOpen("关闭应用锁？下次打开 App 就不需要 PIN 了。", "关闭", false, ""))) return;
+    api.clearPin("app");
+    appUnlocked = true;
+    refreshLockInfo();
+    paintSecurityUI();
+    toast("应用锁已关闭", "ok");
+    return;
+  }
+  const pin = await askPin("设置应用锁 PIN", true);
+  if (pin === null) return;
+  if (!api.setPin("app", pin)) { toast("PIN 保存失败"); return; }
+  refreshLockInfo();
+  paintSecurityUI();
+  toast("应用锁已开启，下次启动生效", "ok");
+}
+
+async function toggleFolderLock() {
+  const api = lockApi();
+  if (!api) { toast("只有安卓 App 支持文件夹锁"); return; }
+  if (lockInfo.folder_lock) {
+    const pin = await askPin("验证私密文件夹 PIN 后关闭", false);
+    if (pin === null) return;
+    if (!api.verifyPin("folder", pin)) { toast("PIN 不对，没有关闭"); return; }
+    api.clearPin("folder");
+    folderUnlocked = false;
+    refreshLockInfo();
+    paintSecurityUI();
+    toast("私密文件夹锁已关闭", "ok");
+    return;
+  }
+  let path = await pickFolder("", "选择要上锁的文件夹", "选定这个文件夹");
+  if (path === null) return;
+  if (!path) { toast("不能锁根目录，请选择子文件夹"); return; }
+  const pin = await askPin("设置私密文件夹 PIN", true);
+  if (pin === null) return;
+  if (!api.setPin("folder", pin)) { toast("PIN 保存失败"); return; }
+  if (!api.setFolderPath(path)) {
+    api.clearPin("folder");
+    toast("文件夹路径保存失败");
+    return;
+  }
+  refreshLockInfo();
+  paintSecurityUI();
+  folderUnlocked = false;
+  toast("已锁上 /" + normDir(path), "ok");
+}
+
+async function changeFolderPath() {
+  const api = lockApi();
+  if (!api) return;
+  if (lockInfo.folder_lock) {
+    const pin = await askPin("先验证私密文件夹 PIN", false);
+    if (pin === null) return;
+    if (!api.verifyPin("folder", pin)) { toast("PIN 不对，路径没有改"); return; }
+  }
+  const path = await pickFolder(lockInfo.folder_path || "", "选择要上锁的文件夹", "选定这个文件夹");
+  if (path === null) return;
+  if (!path) { toast("不能锁根目录"); return; }
+  if (!api.setFolderPath(path)) { toast("路径保存失败"); return; }
+  folderUnlocked = false;
+  refreshLockInfo();
+  paintSecurityUI();
+  toast("已改为锁定 /" + normDir(path), "ok");
+}
+
+(function bindSecurityUI() {
+  $("btnAppLock").addEventListener("click", toggleAppLock);
+  $("btnFolderLock").addEventListener("click", toggleFolderLock);
+  $("btnFolderPick").addEventListener("click", changeFolderPath);
+  $("btnLockNow").addEventListener("click", () => {
+    if (!lockInfo.app_lock) { toast("应用锁还没开启", "ok"); return; }
+    if (!$("lockScreen").classList.contains("hidden")) return;
+    appUnlocked = false;
+    showLock("app").then(() => { appUnlocked = true; });
+  });
+  $("btnFolderUnlockNow").addEventListener("click", () => {
+    folderUnlocked = false;
+    toast(lockInfo.folder_lock ? "私密文件夹已重新锁上" : "文件夹锁还没开启", "ok");
+  });
+})();
+
+let hiddenAt = 0;
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  const away = hiddenAt ? Date.now() - hiddenAt : 0;
+  hiddenAt = 0;
+  if (away < 20000) return;
+  folderUnlocked = false;
+  if (lockInfo.app_lock && $("lockScreen").classList.contains("hidden")) {
+    appUnlocked = false;
+    showLock("app").then(() => { appUnlocked = true; });
+  }
+});
 
 async function removeEntry(e) {
   if (!(await askDelete(e.name))) return;
@@ -962,24 +1563,147 @@ $("btnUp").addEventListener("click", () => {
   const parent = state.cwd.split("/").slice(0, -1).join("/");
   goTo(parent);
 });
-$("btnSetup").addEventListener("click", () => {
-  state.setupTouched = true; // 用户手动开过设置，之后状态刷新别再把它关掉
-  $("setupPanel").classList.toggle("hidden");
+// 设置 / 上传都是独立一层：打开时锁住背后的文件列表滚动
+function syncModalState() {
+  const setupOpen = $("setupPanel") && !$("setupPanel").classList.contains("hidden");
+  const uploadOpen = $("uploadSheet") && !$("uploadSheet").classList.contains("hidden");
+  document.body.classList.toggle("modal-open", !!(setupOpen || uploadOpen));
+  document.body.classList.toggle("upload-open", uploadOpen);
+}
+function openSetup(tab) {
+  state.setupTouched = true; // 用户手动开过设置，之后状态刷新别再抢焦点
+  const panel = $("setupPanel");
+  panel.classList.remove("hidden");
+  if (tab) setTab(tab);
+  renderSetupFiles();
+  refreshSyncProgress();
+  syncModalState();
+}
+function closeSetup() {
+  $("setupPanel").classList.add("hidden");
+  syncModalState();
+}
+function openUpload(pickNow) {
+  $("uploadSheet").classList.remove("hidden");
+  syncModalState();
+  if (pickNow) setTimeout(() => $("fileInput").click(), 80);
+}
+function closeUpload() {
+  $("uploadSheet").classList.add("hidden");
+  syncModalState();
+}
+
+// 设置页底部的「网盘文件」：保留老版设置下面能看到文件的感觉，点一条直接打开。
+function setupFileKind(e) {
+  if (e.dir) return "folder";
+  if (isImage(e.name)) return "image";
+  if (isVideo(e.name)) return "video";
+  if (isAudio(e.name)) return "audio";
+  return fileKind(e.name);
+}
+function renderSetupFiles() {
+  const wrap = $("setupFiles");
+  if (!wrap) return;
+  const here = state.cwd ? state.cwd : "根目录";
+  const n = (state.entries || []).length;
+  $("setupFilesPath").textContent = here + (n ? " · " + n + " 项" : "");
+  wrap.innerHTML = "";
+  if (!state.configured) {
+    wrap.innerHTML = '<span class="muted">还没接入网盘，先在「云端连接」里完成配置。</span>';
+    return;
+  }
+  const list = sortedEntries();
+  if (!list.length) {
+    wrap.innerHTML = '<span class="muted">这个目录还没有文件，点「打开网盘」去上传。</span>';
+    return;
+  }
+  const max = 8;
+  list.slice(0, max).forEach((e) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "setup-file tap";
+    row.innerHTML =
+      '<span class="sf-ico">' + svgIcon(setupFileKind(e)) + "</span>" +
+      '<span class="sf-txt"><span class="sf-name">' + escapeHtml(e.name) + "</span>" +
+      '<span class="sf-sub">' + (e.dir ? "文件夹" : fmtSize(e.size || 0)) + "</span></span>";
+    row.addEventListener("click", () => {
+      closeSetup();
+      if (e.dir) goTo(e.path);
+      else openViewer(e);
+    });
+    wrap.appendChild(row);
+  });
+  if (list.length > max) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "setup-file tap";
+    more.innerHTML = '<span class="sf-ico">…</span><span class="sf-txt"><span class="sf-name">还有 ' +
+      (list.length - max) + " 项，点这里看全部</span></span>";
+    more.addEventListener("click", () => { closeSetup(); goTo(state.cwd); });
+    wrap.appendChild(more);
+  }
+}
+$("btnSetup").addEventListener("click", () => openSetup());
+$("btnSetupClose").addEventListener("click", closeSetup);
+$("btnSetupBrowse").addEventListener("click", () => {
+  closeSetup();
+  goTo(state.cwd);
+});
+$("uploadFab").addEventListener("click", () => openUpload(false));
+$("btnUploadClose").addEventListener("click", closeUpload);
+$("uploadMask").addEventListener("click", closeUpload);
+document.addEventListener("keydown", (ev) => {
+  if (ev.key !== "Escape") return;
+  if (!$("uploadSheet").classList.contains("hidden")) { closeUpload(); return; }
+  if (!$("setupPanel").classList.contains("hidden")) closeSetup();
 });
 
+
 // 设置面板切成「接入 / 备份 / 界面」三页，避免一屏滚到底
+async function loadCacheStatus() {
+  try {
+    const c = await api("/api/cache/status");
+    const name = c.enabled ? fmtSize(c.bytes) + " / " + fmtSize(c.limit) + " · " + c.files + " 张" : "未启用";
+    $("cacheStat").textContent = name;
+  } catch (err) {
+    $("cacheStat").textContent = "读取失败：" + err.message;
+  }
+}
+async function clearCache() {
+  showBusy("正在清理预览缓存…");
+  try {
+    await api("/api/cache/clear", { method: "POST" });
+    toast("预览缓存已清空", "ok");
+    await loadCacheStatus();
+  } catch (err) {
+    toast("清理失败：" + err.message);
+  } finally {
+    hideBusy();
+  }
+}
+$("btnCacheClear").addEventListener("click", clearCache);
+
 function setTab(name) {
   $("tabConnect").classList.toggle("hidden", name !== "connect");
   $("tabBackup").classList.toggle("hidden", name !== "backup");
+  $("tabSecurity").classList.toggle("hidden", name !== "security");
   $("tabUI").classList.toggle("hidden", name !== "ui");
   $("btnTabConnect").classList.toggle("on", name === "connect");
   $("btnTabBackup").classList.toggle("on", name === "backup");
+  $("btnTabSecurity").classList.toggle("on", name === "security");
   $("btnTabUi").classList.toggle("on", name === "ui");
   if (name === "backup") loadAlbumCatalog();
+  if (name === "ui") loadCacheStatus();
+  if (name === "security") {
+    refreshLockInfo();
+    paintSecurityUI();
+  }
 }
 $("btnTabConnect").addEventListener("click", () => setTab("connect"));
 $("btnTabBackup").addEventListener("click", () => setTab("backup"));
+$("btnTabSecurity").addEventListener("click", () => setTab("security"));
 $("btnTabUi").addEventListener("click", () => setTab("ui"));
+// 默认页在文件末尾再设：这里太早，albumCatalog 还没初始化
 
 $("btnGrid").addEventListener("click", () => setView("grid"));
 $("btnList").addEventListener("click", () => setView("list"));
@@ -1306,7 +2030,11 @@ $("btnTheme").addEventListener("click", () => {
   const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
   localStorage.setItem(THEME_KEY, next);
   applyTheme(next, true);
+  renderThemeMode();
 });
+$("btnThemeAuto").addEventListener("click", () => setThemeMode("auto"));
+$("btnThemeDark").addEventListener("click", () => setThemeMode("dark"));
+$("btnThemeLight").addEventListener("click", () => setThemeMode("light"));
 
 $("pickFile").addEventListener("click", (ev) => { ev.preventDefault(); $("fileInput").click(); });
 $("fileInput").addEventListener("change", (ev) => {
@@ -1341,27 +2069,60 @@ let syncCur = { enabled: false, dir: "相册备份", wifiOnly: false, result: ""
 
 function applySyncState(st) {
   syncCur = st;
-  $("syncState").textContent = st.enabled ? "运行中" : "未开启";
-  $("btnSyncToggle").textContent = st.enabled ? "关闭自动同步" : "开启自动同步";
-  $("btnSyncToggle").classList.toggle("primary", !st.enabled);
-  $("syncDir").value = st.dir || "相册备份";
-  $("btnSyncWifi").textContent = "仅 Wi-Fi：" + (st.wifiOnly ? "开" : "关");
+  $("btnSyncDir").textContent = st.dir || "相册备份";
+  $("btnSyncWifi").textContent = st.wifiOnly ? "已开启" : "已关闭";
+  $("btnSyncWifi").classList.toggle("on", !!st.wifiOnly);
   $("btnSyncPerm").classList.toggle("hidden", !!st.hasPermission);
   $("syncMsg").textContent = st.result || "";
-  $("btnSyncKeep").textContent = "按相册名分文件夹：" + (st.keepAlbum === false ? "关" : "开");
+  $("btnSyncKeep").textContent = st.keepAlbum === false ? "已关闭" : "已开启";
+  $("btnSyncKeep").classList.toggle("on", st.keepAlbum !== false);
   renderAlbumPicks(st.albums || []);
+  renderFolders(st.folders || []);
+  if ($("folderRoot")) $("folderRoot").textContent = st.folderDir || "文件备份";
   syncToggle("btnContacts", !!st.contacts);
   syncToggle("btnSms", !!st.sms);
   syncToggle("btnCalls", !!st.calls);
   const needPerm = !st.hasPermission || !st.hasContacts || !st.hasSms || !st.hasCalls;
   $("btnPermAll").classList.toggle("hidden", !needPerm);
   $("btnSyncPerm").classList.toggle("hidden", !needPerm);
+  paintProgress(st);
+}
+
+// 同步进度：浮条 + 设置页状态行；只在总任务 >0 时画百分比。
+function paintProgress(pg) {
+  if (!pg) return;
+  const running = !!pg.running;
+  const total = Number(pg.total) || 0;
+  const done = Math.min(Number(pg.done) || 0, total || 1e9);
+  const el = $("syncBar");
+  if (el) {
+    el.classList.toggle("hidden", !running);
+    if (running) {
+      const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+      $("syncBarTitle").textContent = total > 0 ? "正在同步相册 " + done + "/" + total : "正在检查新照片";
+      $("syncBarPct").textContent = total > 0 ? pct + "%" : "";
+      $("syncBarFile").textContent = pg.current || (total > 0 ? "等待上传…" : "正在比对云端清单…");
+      $("syncBarFill").style.width = (total > 0 ? Math.max(2, pct) : 3) + "%";
+    }
+  }
+  const line = $("syncState");
+  if (line) {
+    line.textContent = running
+      ? (total > 0 ? "正在同步 " + done + "/" + total : "正在检查新照片…")
+      : (pg.enabled ? "运行中" : "未开启");
+    line.classList.toggle("busy", running);
+  }
+  const toggle = $("btnSyncToggle");
+  if (toggle && typeof pg.enabled === "boolean") {
+    toggle.textContent = pg.enabled ? "关闭自动同步" : "开启自动同步";
+    toggle.classList.toggle("primary", !pg.enabled);
+  }
 }
 
 function syncToggle(id, on) {
   const b = $(id);
   if (!b) return;
-  b.textContent = on ? "开" : "关";
+  b.textContent = on ? "已开启" : "已关闭";
   b.classList.toggle("on", on);
   b.classList.toggle("primary", on);
 }
@@ -1369,6 +2130,22 @@ function syncToggle(id, on) {
 // 相册勾选：不选＝全部；点一下切换。选中的相册在云端各建一个同名文件夹。
 let albumCatalog = [];
 let albumSelected = [];
+
+// 原生后台把某个相册封面做好后会回调这里：只换那一张图，不整页重排。
+window.onAlbumCover = function (name, data) {
+  if (!name || !data) return;
+  const a = albumCatalog.find((x) => x.name === name);
+  if (a) a.cover = data;
+  const box = $("albumPicks");
+  if (!box) return;
+  const picks = box.querySelectorAll(".pick");
+  for (const b of picks) {
+    if (b.dataset.name === name) {
+      b.querySelector(".pick-cover").innerHTML = `<img src="${data}" alt="">`;
+      break;
+    }
+  }
+};
 
 function renderAlbumPicks(selected) {
   albumSelected = Array.isArray(selected) ? selected.slice() : [];
@@ -1382,6 +2159,7 @@ function renderAlbumPicks(selected) {
     const on = albumSelected.includes(a.name);
     const b = document.createElement("button");
     b.className = "pick tap" + (on ? " on" : "");
+    b.dataset.name = a.name;
     b.setAttribute("aria-pressed", on ? "true" : "false");
     const sub = [a.path, a.count + " 项"].filter(Boolean).map(escapeHtml).join(" · ");
     b.innerHTML =
@@ -1396,6 +2174,39 @@ function renderAlbumPicks(selected) {
       saveAlbums();
     });
     box.appendChild(b);
+  }
+}
+
+// 任意文件夹：系统目录选择器选中的目录列表
+function renderFolders(list) {
+  const box = $("folderList");
+  if (!box) return;
+  if (!Array.isArray(list) || !list.length) {
+    box.innerHTML = `<span class="muted">还没添加。可以选「下载」「微信」「Documents」等任意目录，整棵目录递归备份。</span>`;
+    return;
+  }
+  box.innerHTML = "";
+  const root = syncCur.folderDir || "文件备份";
+  for (const f of list) {
+    const name = f.name || "文件夹";
+    const d = document.createElement("div");
+    d.className = "folder-item";
+    d.innerHTML = `<span class="fi-ico">📁</span>` +
+      `<span class="fi-t"><span class="fi-n">${escapeHtml(name)}</span>` +
+      `<span class="fi-p">云端：${escapeHtml(root + "/" + name)}</span></span>`;
+    const x = document.createElement("button");
+    x.className = "fx ghost tap";
+    x.textContent = "移除";
+    x.addEventListener("click", () => {
+      try {
+        applySyncState(JSON.parse(window.Sync.removeFolder(f.uri)));
+        toast("已移除：" + name, "ok");
+      } catch (e) {
+        toast("移除失败：" + e.message);
+      }
+    });
+    d.appendChild(x);
+    box.appendChild(d);
   }
 }
 
@@ -1423,6 +2234,16 @@ function refreshSyncState() {
   try {
     applySyncState(JSON.parse(window.Sync.state()));
   } catch (e) { /* 桥还没挂上时忽略 */ }
+}
+
+// 1.5 秒一次的轻量进度轮询；老包（没有 progress 接口）自动跳过。
+function refreshSyncProgress() {
+  if (!window.Sync || typeof window.Sync.progress !== "function") return;
+  try { paintProgress(JSON.parse(window.Sync.progress())); } catch (e) { /* 忽略 */ }
+}
+if (window.Sync && typeof window.Sync.progress === "function") {
+  setInterval(refreshSyncProgress, 1500);
+  refreshSyncProgress();
 }
 
 window.onSyncUpdate = function (msg) {
@@ -1461,10 +2282,20 @@ function initSyncUI() {
       applySyncState(JSON.parse(window.Sync.setWifiOnly(!syncCur.wifiOnly)));
     } catch (e) { toast("设置失败：" + e.message); }
   });
-  $("syncDir").addEventListener("change", () => {
+  $("btnSyncDir").addEventListener("click", async () => {
+    const now = syncCur.dir || "相册备份";
+    const name = await askInput(
+      "把云端目录「" + now + "」改名为？（只改名字，已上传的照片不会搬动）",
+      now,
+      "保存"
+    );
+    if (name === null) return; // 取消：一个字都不改
+    const next = name.trim();
+    if (!next || next === now) return;
+    if (/[\\/]/.test(next)) { toast("目录名里不能有 / 或 \\"); return; }
     try {
-      applySyncState(JSON.parse(window.Sync.setDir($("syncDir").value)));
-      toast("同步目录已改为：" + syncCur.dir, "ok");
+      applySyncState(JSON.parse(window.Sync.setDir(next)));
+      toast("云端目录已改为：" + syncCur.dir, "ok");
     } catch (e) { toast("设置失败：" + e.message); }
   });
   $("btnSyncKeep").addEventListener("click", () => {
@@ -1476,6 +2307,12 @@ function initSyncUI() {
   $("btnAlbumsAll").addEventListener("click", () => {
     albumSelected = [];
     saveAlbums();
+  });
+  $("btnAddFolder").addEventListener("click", () => {
+    try {
+      window.Sync.pickFolder();
+      toast("选好文件夹后会自动加入备份列表", "ok");
+    } catch (e) { toast("打开目录选择器失败：" + e.message); }
   });
   const bindKind = (id, setter, key, label) => {
     $(id).addEventListener("click", () => {
@@ -1501,11 +2338,15 @@ function initSyncUI() {
   }, 5000);
 }
 initSyncUI();
+renderThemeMode();
+// 手机上默认落在「自动备份」；PC 端没有相册备份，落在「云端连接」
+setTab(window.Sync ? "backup" : "connect");
 
 function applyShowDel() {
   document.body.classList.toggle("show-del", state.showDel);
   const b = $("btnShowDel");
   if (b) b.textContent = "显示删除按钮（×）：" + (state.showDel ? "开" : "关");
+  if (b) b.classList.toggle("on", !!state.showDel);
 }
 
 (function initUiPrefs() {
@@ -1519,7 +2360,29 @@ function applyShowDel() {
   });
 })();
 
+async function initLockGate() {
+  refreshLockInfo();
+  paintSecurityUI();
+  if (lockInfo.app_lock) {
+    appUnlocked = false;
+    await showLock("app");
+    appUnlocked = true;
+  }
+  // 上次退出时正停在私密文件夹：解锁 App 之后还要再过一次文件夹锁。
+  if (isPrivatePath(state.cwd)) {
+    folderUnlocked = false;
+    const ok = await showLock("folder", "继续上次打开的私密文件夹");
+    if (ok) folderUnlocked = true;
+    else {
+      state.cwd = "";
+      saveCwd();
+    }
+  }
+}
+window.__lockReady = initLockGate();
+
 (async function boot() {
+  await window.__lockReady;
   // 先用上次的缓存把列表画出来，不等 /api/status、更不等云端：
   // 冷启动第一眼就是上次的目录和缩略图，随后再在后台刷新。
   const cached = state.cache[state.cwd];

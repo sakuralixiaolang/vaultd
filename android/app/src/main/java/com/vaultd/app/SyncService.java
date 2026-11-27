@@ -25,6 +25,7 @@ public class SyncService extends Service {
     private HandlerThread thread;
     private Handler handler;
     private Runnable tick;
+    private boolean firstRun = true;
 
     public static void start(Context ctx) {
         Intent i = new Intent(ctx, SyncService.class);
@@ -64,7 +65,9 @@ public class SyncService extends Service {
                 }
                 final AutoSync.Result r;
                 try {
-                    r = AutoSync.run(SyncService.this);
+                    // 服务刚起来的第一轮做全量补齐；之后每 15 分钟只看最近的增量。
+                    r = AutoSync.run(SyncService.this, firstRun);
+                    firstRun = false;
                 } catch (Throwable t) {
                     Log.w(TAG, "同步异常: " + t.getMessage());
                     handler.postDelayed(this, INTERVAL_MS);
@@ -79,6 +82,7 @@ public class SyncService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         startForeground(NID, notification("自动同步已开启"));
+        firstRun = true;
         handler.removeCallbacks(tick);
         handler.post(tick); // 开启后先跑一轮，用户马上能看到效果
         return START_STICKY;

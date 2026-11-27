@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0f1419">
+<meta name="theme-color" content="#0b0f14">
 <title>我的网盘</title>
 <script>
 // 在第一帧之前定好主题：原生窗口底色 → 本地记忆 → 系统设置，避免白闪/黑闪。
@@ -20,146 +20,106 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<header>
+
+<header class="appbar">
   <div class="brand">
     <span class="dot" id="health"></span>
-    <strong>我的网盘</strong>
-    <span class="muted" id="keyfp"></span>
+    <div class="brand-txt">
+      <strong>我的网盘</strong>
+      <span class="status-pill" id="statusText">连接中</span>
+    </div>
   </div>
-  <nav>
-    <button id="btnTheme" class="ghost tap" title="切换深浅色">◐</button>
-    <button id="btnSetup" class="ghost tap">设置</button>
+  <nav class="top-actions">
+    <button id="btnTheme" class="icon-btn tap" title="切换深浅色">◐</button>
+    <button id="btnSetup" class="icon-btn tap" title="设置">⚙</button>
   </nav>
 </header>
 
-<nav id="crumbs" class="crumbs" aria-label="目录路径"></nav>
+<div class="contextbar">
+  <button id="btnUp" class="icon-btn tap" title="上一级" disabled>↑</button>
+  <nav id="crumbs" class="crumbs" aria-label="目录路径"></nav>
+</div>
+
+<div id="syncBar" class="syncbar hidden" aria-live="polite">
+  <span class="spin"></span>
+  <div class="sb-main">
+    <div class="sb-top"><b id="syncBarTitle">正在同步</b><span id="syncBarPct"></span></div>
+    <div id="syncBarFile" class="sb-file">准备中…</div>
+    <div class="sb-track"><i id="syncBarFill"></i></div>
+  </div>
+</div>
 
 <main>
-  <section id="setupPanel" class="panel hidden">
-    <div class="seg tabs">
-      <button id="btnTabConnect" class="on tap">接入</button>
-      <button id="btnTabBackup" class="tap">备份</button>
-      <button id="btnTabUi" class="tap">界面</button>
-    </div>
-    <div id="tabConnect">
-    <h2 id="setupTitle">云端接入</h2>
-    <div class="seg mode-seg">
-      <button id="btnModeNative" class="tap">内置直连（139）</button>
-      <button id="btnModeWebdav" class="tap">外部 WebDAV</button>
-    </div>
-    <p id="webdavHint" class="hint">目标存储必须开启「Web 代理 / WebDAV 本地代理」，否则 Range 不成立，视频无法拖动。</p>
-    <p id="nativeNote" class="hint hidden">内置驱动：网关直连云端，不需要外部 WebDAV 进程。授权串、主密钥、盐可从 PC 端的
-      <code>%APPDATA%\EncryptedVault\</code> 目录里一次取全；<b>主密钥与盐留空＝新建一把钥匙</b>，打不开云端已有密文。</p>
-    <div class="row"><button id="btnNativeToggle" class="ghost tap hidden">换账号 / 导入</button></div>
-    <div id="nativeForm" class="hidden">
-      <div class="grid">
-        <label>云端授权串<textarea id="fAuth" rows="3" placeholder="粘贴 config.json 里的 cloud_authorization（base64 一长串）"></textarea></label>
-        <label>主密钥（可留空）<input id="fKey" placeholder="64 位 hex；新设备要导入同一把钥匙时填" autocomplete="off"></label>
-        <label>盐（可留空）<input id="fSalt" placeholder="64 位 hex；与主密钥成对" autocomplete="off"></label>
-        <label>密文根目录<input id="fRemoteN" placeholder="vault" value="vault" autocomplete="off"></label>
-        <label>分片大小<input id="fChunkN" placeholder="500Mi" value="500Mi" autocomplete="off"></label>
+  <section class="panel library">
+    <div class="lib-head">
+      <div class="lib-title">
+        <h2>文件</h2>
+        <span class="muted" id="count"></span>
       </div>
-      <div class="row">
-        <button id="btnSaveCloud" class="primary tap">保存并连接</button>
-        <span id="cloudMsg" class="muted"></span>
-      </div>
-
-      <div id="transferBox">
-        <p class="hint"><b>省掉手抄：</b>电脑端点「导出配置」得到一个 <code>vaultd-config.json</code>，
-          发到手机后在这里「选择文件导入」，一次把授权串、主密钥、盐全部搬过来。</p>
-        <div class="row wrap">
-          <a id="btnExportCfg" class="ghost tap" href="/api/config/export" download="vaultd-config.json">导出配置</a>
-          <button id="btnImportCfg" class="ghost tap">选择文件导入</button>
-          <button id="btnExportText" class="ghost tap">导出为文本</button>
+      <div class="tools">
+        <select id="sortSel" class="select tap" title="排序">
+          <option value="name">名称</option>
+          <option value="time">时间</option>
+          <option value="size">大小</option>
+        </select>
+        <div class="seg view-seg" role="group" aria-label="视图">
+          <button id="btnGrid" data-mode="grid" class="tap" title="网格">▦</button>
+          <button id="btnList" data-mode="list" class="tap" title="列表">☰</button>
         </div>
-        <input id="cfgFile" type="file" accept=".json,application/json,text/plain" hidden>
-        <textarea id="cfgText" rows="3" placeholder="或把导出文件的整段内容粘贴到这里"></textarea>
-        <div class="row">
-          <button id="btnImportText" class="ghost tap">从文本导入</button>
-          <span id="xferMsg" class="muted"></span>
-        </div>
-        <p class="hint">导出文件里含主密钥，等于整库钥匙：别发给别人，导入完就删掉。</p>
+        <button id="btnMkdir" class="icon-btn tap" title="新建文件夹">＋</button>
+        <button id="btnSelect" class="icon-btn tap" title="整理：多选移动、重命名、删除">☑</button>
+        <button id="btnRefresh" class="icon-btn tap" title="刷新">⟳</button>
       </div>
     </div>
-    <div id="webdavForm">
-      <div class="grid">
-        <label>WebDAV 地址<input id="fUrl" placeholder="http://127.0.0.1:5244/dav" autocomplete="off"></label>
-        <label>用户名<input id="fUser" placeholder="openlist 账号" autocomplete="off"></label>
-        <label>密码<input id="fPass" type="password" placeholder="openlist 密码" autocomplete="off"></label>
-        <label>密文根目录<input id="fRemote" placeholder="vault" value="vault" autocomplete="off"></label>
-        <label>分片大小<input id="fChunk" placeholder="500Mi" value="500Mi" autocomplete="off"></label>
-      </div>
-      <div class="row">
-        <button id="btnSave" class="primary tap">保存并连接</button>
-        <span id="setupMsg" class="muted"></span>
-      </div>
-    </div>
-
-    </div>
-
-    <div id="tabBackup" class="hidden">
-    <div id="syncBox" class="hidden">
-      <h2>相册自动同步 <span class="muted" id="syncState">未开启</span></h2>
-      <p class="hint">App 在后台每 15 分钟扫一次系统相机/相册里的新照片和视频，直接加密传到云端的这个目录里；已经传过的不再重复传。</p>
-      <div class="row">
-        <button id="btnSyncToggle" class="tap">开启自动同步</button>
-        <button id="btnSyncNow" class="ghost tap">立即同步</button>
-        <button id="btnSyncPerm" class="ghost tap hidden">授权访问相册</button>
-      </div>
-      <div class="grid">
-        <label>云端目录<input id="syncDir" placeholder="相册备份" value="相册备份" autocomplete="off"></label>
-        <label>网络<button id="btnSyncWifi" class="ghost tap" style="width:100%">仅 Wi-Fi：关</button></label>
-      </div>
-      <div class="row">
-        <button id="btnSyncKeep" class="ghost tap">按相册名分文件夹：开</button>
-      </div>
-      <div class="picks-head">
-        <b>备份哪些相册</b>
-        <button id="btnAlbumsAll" class="ghost tap">全部相册</button>
-      </div>
-      <div id="albumPicks" class="picks"><span class="muted">授权后这里会列出系统相册</span></div>
-      <p class="hint">不勾选任何相册＝全部；勾选后只备份这几个。云端会按相册名建子文件夹，上面「分文件夹」关掉则全部平铺在云端目录里。</p>
-
-      <div class="picks-head">
-        <b>通讯录 / 短信 / 通话记录</b>
-        <button id="btnPermAll" class="ghost tap">授权</button>
-      </div>
-      <div class="opts">
-        <div class="opt">
-          <div class="opt-t"><b>通讯录</b><span class="muted">导出 vCard（姓名 + 号码），每天一份</span></div>
-          <button id="btnContacts" class="ghost tap">关</button>
-        </div>
-        <div class="opt">
-          <div class="opt-t"><b>短信</b><span class="muted">最近 2000 条，JSON 快照</span></div>
-          <button id="btnSms" class="ghost tap">关</button>
-        </div>
-        <div class="opt">
-          <div class="opt-t"><b>通话记录</b><span class="muted">最近 2000 条，JSON 快照</span></div>
-          <button id="btnCalls" class="ghost tap">关</button>
-        </div>
-      </div>
-      <p class="hint">这三类会存到云端目录下的「通讯录 / 短信 / 通话记录」子文件夹，内容没变当天不会重复上传。</p>
-      <p class="hint" id="syncMsg"></p>
-    </div>
-
-    </div>
-
-    <div id="tabUI" class="hidden">
-    <div id="uiBox" class="hidden">
-      <h2>界面与误删保护</h2>
-      <div class="row">
-        <button id="btnShowDel" class="ghost tap">显示删除按钮（×）：关</button>
-      </div>
-      <p class="hint">关掉之后格子和列表上都不再出现 × ，要删得长按文件（约半秒）再确认，手滑也不会误删。</p>
-    </div>
-    </div>
+    <div id="filters" class="filters"></div>
+    <div id="list" class="album"><div class="boot-hint"><span class="spin"></span>正在连接网盘…</div></div>
   </section>
+</main>
 
-  <section class="panel">
+<button id="uploadFab" class="fab tap" title="上传文件">＋<span>上传</span></button>
+
+<div id="selBar" class="sel-bar hidden">
+  <span id="selCount" class="sel-count">已选 0 项</span>
+  <button id="btnMoveSel" class="primary tap">移动</button>
+  <button id="btnRenameSel" class="ghost tap">重命名</button>
+  <button id="btnDeleteSel" class="danger tap">删除</button>
+  <button id="btnSelDone" class="ghost tap">完成</button>
+</div>
+
+<!-- 目录选择器：只列文件夹，点进去，再选“移到这里” -->
+<div id="picker" class="sheet hidden">
+  <div id="pickerMask" class="sheet-mask"></div>
+  <div class="sheet-card picker-card">
+    <div class="sheet-head">
+      <div>
+        <h2 id="pickerTitle">移动到</h2>
+        <p class="sub" id="pickerPath">根目录</p>
+      </div>
+      <button id="pickerClose" class="icon-btn tap" title="关闭">✕</button>
+    </div>
+    <div id="pickerList" class="picker-list"></div>
+    <div class="action-row picker-foot">
+      <button id="pickerUp" class="ghost tap">上一级</button>
+      <button id="pickerOk" class="primary tap">移到这里</button>
+    </div>
+  </div>
+</div>
+
+<!-- 上传：底部抽屉，选完文件后留在里面看进度 -->
+<div id="uploadSheet" class="sheet hidden">
+  <div id="uploadMask" class="sheet-mask"></div>
+  <div class="sheet-card upload-card">
+    <div class="sheet-head">
+      <div>
+        <h2>上传文件</h2>
+        <p class="sub">在本机加密后传到当前目录</p>
+      </div>
+      <button id="btnUploadClose" class="icon-btn tap" title="关闭">✕</button>
+    </div>
     <div id="drop" class="drop">
       <input id="fileInput" type="file" multiple hidden>
-      <button id="pickFile" class="primary tap">＋ 上传文件</button>
-      <p class="hint drop-hint">照片、视频、文档、压缩包……任意文件都能传，上传前在本机完成加密。</p>
+      <button id="pickFile" class="primary tap">＋ 选择文件</button>
+      <p class="hint drop-hint">照片、视频、文档、压缩包……任意文件，上传前完成加密。</p>
       <div id="upTarget" class="up-target">
         <span class="muted">上传到</span>
         <select id="upFolder" class="tap" title="选择目标文件夹"></select>
@@ -169,30 +129,279 @@
       </div>
       <div id="queue"></div>
     </div>
-  </section>
+  </div>
+</div>
 
-  <section class="panel library">
-    <div class="row between lib-head">
-      <h2>媒体库 <span class="muted" id="count"></span></h2>
-      <div class="row tools">
-        <select id="sortSel" class="tap" title="排序">
-          <option value="name">名称</option>
-          <option value="time">时间</option>
-          <option value="size">大小</option>
-        </select>
-        <div class="seg" role="group" aria-label="视图">
-          <button id="btnGrid" data-mode="grid" class="tap" title="网格">▦</button>
-          <button id="btnList" data-mode="list" class="tap" title="列表">☰</button>
+<!-- 设置：整屏，带返回，不再挤在文件列表里 -->
+<div id="setupPanel" class="panel setup-sheet hidden" role="dialog" aria-modal="true" aria-label="设置">
+  <div class="setup-inner">
+    <div class="sheet-head setup-head">
+      <div>
+        <h2>设置</h2>
+        <p class="sub">连接、备份、安全与外观</p>
+      </div>
+      <button id="btnSetupClose" class="primary tap">完成</button>
+    </div>
+
+    <div class="tabs" role="tablist">
+      <button id="btnTabBackup" class="tab on" role="tab">自动备份</button>
+      <button id="btnTabSecurity" class="tab" role="tab">安全</button>
+      <button id="btnTabConnect" class="tab" role="tab">云端连接</button>
+      <button id="btnTabUi" class="tab" role="tab">外观</button>
+    </div>
+
+    <!-- ========== 自动备份 ========== -->
+    <div id="tabBackup" class="tabpane">
+      <div id="syncBox" class="card hidden">
+        <div class="card-head">
+          <div>
+            <h3>相册自动同步 <span id="syncState" class="badge">未开启</span></h3>
+            <p class="sub">后台每 15 分钟扫一次新照片和视频，已传过的自动跳过。</p>
+          </div>
         </div>
-        <button id="btnMkdir" class="ghost tap" title="新建文件夹">＋文件夹</button>
-        <button id="btnUp" class="ghost tap" disabled>↑</button>
-        <button id="btnRefresh" class="ghost tap" title="刷新">⟳</button>
+        <div class="action-row">
+          <button id="btnSyncToggle" class="primary tap">开启自动同步</button>
+          <button id="btnSyncNow" class="ghost tap">立即同步</button>
+          <button id="btnSyncPerm" class="ghost tap hidden">授权访问相册</button>
+        </div>
+        <p class="hint" id="syncMsg"></p>
+
+        <div class="setting-list">
+          <div class="setting-row">
+            <span class="sr-t"><b>云端目录</b><em>照片放在云端的这个文件夹，改名需要确认</em></span>
+            <button id="btnSyncDir" class="pill tap">相册备份</button>
+          </div>
+          <div class="setting-row">
+            <span class="sr-t"><b>仅 Wi-Fi</b><em>移动网络下不自动上传</em></span>
+            <button id="btnSyncWifi" class="pill tap">仅 Wi-Fi：关</button>
+          </div>
+          <div class="setting-row">
+            <span class="sr-t"><b>按相册名分文件夹</b><em>保留 DCIM/Camera 这类结构</em></span>
+            <button id="btnSyncKeep" class="pill tap">按相册名分文件夹：开</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h3>备份哪些相册</h3>
+            <p class="sub">不勾选 = 全部相册；勾选后只备份选中的。</p>
+          </div>
+          <button id="btnAlbumsAll" class="ghost tap">全部相册</button>
+        </div>
+        <div id="albumPicks" class="picks"><span class="muted">授权后这里会列出系统相册</span></div>
+        <p class="hint">云端会按相册名建子文件夹；关掉「按相册名分文件夹」则全部平铺。</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h3>任意文件夹</h3>
+            <p class="sub">递归备份，云端按「<span id="folderRoot">文件备份</span>／文件夹名」存放。</p>
+          </div>
+          <button id="btnAddFolder" class="ghost tap">＋ 添加</button>
+        </div>
+        <div id="folderList" class="folder-list"><span class="muted">还没添加。可添加「下载」「微信」「Documents」等目录。</span></div>
+        <p class="hint">首次全量，之后按「文件名＋大小」跳过没变的；系统不允许选 Android/data、Android/obb 和存储根目录。</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h3>通讯录 / 短信 / 通话记录</h3>
+            <p class="sub">内容没变当天不会重复上传。</p>
+          </div>
+          <button id="btnPermAll" class="ghost tap">授权</button>
+        </div>
+        <div class="opts">
+          <div class="opt">
+            <div class="opt-t"><b>通讯录</b><span class="muted">导出 vCard（姓名 + 号码），每天一份</span></div>
+            <button id="btnContacts" class="pill tap">关</button>
+          </div>
+          <div class="opt">
+            <div class="opt-t"><b>短信</b><span class="muted">最近 2000 条，JSON 快照</span></div>
+            <button id="btnSms" class="pill tap">关</button>
+          </div>
+          <div class="opt">
+            <div class="opt-t"><b>通话记录</b><span class="muted">最近 2000 条，JSON 快照</span></div>
+            <button id="btnCalls" class="pill tap">关</button>
+          </div>
+        </div>
+        <p class="hint">存到云端「通讯录 / 短信 / 通话记录」子文件夹。</p>
       </div>
     </div>
-    <div id="filters" class="filters"></div>
-    <div id="list" class="album"></div>
-  </section>
-</main>
+
+    <!-- ========== 安全 ========== -->
+    <div id="tabSecurity" class="tabpane hidden">
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h3>应用锁 <span id="appLockBadge" class="badge">未开启</span></h3>
+            <p class="sub">每次打开 App 或从后台回来，先输入 PIN；有指纹时可直接用指纹。</p>
+          </div>
+        </div>
+        <div class="action-row">
+          <button id="btnAppLock" class="primary tap">开启应用锁</button>
+          <button id="btnLockNow" class="ghost tap">立即锁定</button>
+        </div>
+        <p class="hint" id="appLockMsg">PIN 为 4–8 位数字，只保存在本机，不随网盘同步。</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h3>私密文件夹 <span id="folderLockBadge" class="badge">未开启</span></h3>
+            <p class="sub">只锁一个文件夹；进入它或它的子目录时，需要单独输入 PIN 或指纹。</p>
+          </div>
+        </div>
+        <div class="setting-row">
+          <span class="sr-t"><b>受保护目录</b><em id="folderLockPath">还没有选择</em></span>
+          <button id="btnFolderPick" class="pill tap">选择文件夹</button>
+        </div>
+        <div class="action-row">
+          <button id="btnFolderLock" class="primary tap">开启文件夹锁</button>
+          <button id="btnFolderUnlockNow" class="ghost tap">立即锁上</button>
+        </div>
+        <p class="hint">这是 App 内的门禁：能把误点的人挡住，但不改变云端密文。知道完整文件路径的本地调试接口仍可绕过，重要文件仍靠整库加密保护。</p>
+      </div>
+    </div>
+
+    <!-- ========== 云端连接 ========== -->
+    <div id="tabConnect" class="tabpane hidden">
+      <div class="card conn-card">
+        <div class="card-head">
+          <div>
+            <h3 id="setupTitle">云端接入</h3>
+            <p class="sub" id="connLine">正在读取状态…</p>
+          </div>
+          <span class="badge" id="connBadge">连接中</span>
+        </div>
+        <p class="conn-key muted" id="keyfp"></p>
+      </div>
+
+      <div class="seg mode-seg">
+        <button id="btnModeNative" class="tap">内置直连（139）</button>
+        <button id="btnModeWebdav" class="tap">外部 WebDAV</button>
+      </div>
+      <p id="webdavHint" class="hint">目标存储必须开启「Web 代理 / WebDAV 本地代理」，否则 Range 不成立，视频无法拖动。</p>
+
+      <div class="card" id="transferBox">
+        <div class="card-head">
+          <div>
+            <h3>配置搬家</h3>
+            <p class="sub">从电脑导入，或把本机配置导出备份。</p>
+          </div>
+        </div>
+        <div class="action-row">
+          <button id="btnImportCfg" class="primary tap">选择文件导入</button>
+          <a id="btnExportCfg" class="ghost tap" href="/api/config/export" download="vaultd-config.json">导出配置</a>
+          <button id="btnExportText" class="ghost tap">导出为文本</button>
+        </div>
+        <input id="cfgFile" type="file" accept=".json,application/json,text/plain" hidden>
+        <details class="more">
+          <summary>或者粘贴文本导入</summary>
+          <textarea id="cfgText" rows="3" placeholder="把导出文件的整段内容粘贴到这里"></textarea>
+          <div class="action-row">
+            <button id="btnImportText" class="ghost tap">从文本导入</button>
+            <span id="xferMsg" class="status-text"></span>
+          </div>
+        </details>
+        <p class="hint">导出文件里含主密钥，等于整库钥匙：别发给别人，导入完就删掉。</p>
+      </div>
+
+      <div id="nativeForm">
+        <div class="card">
+          <h3>手动填写</h3>
+          <p class="hint">适合没有 PC 导出文件的场合。</p>
+          <label class="field">云端授权串
+            <textarea id="fAuth" rows="3" placeholder="粘贴 config.json 里的 cloud_authorization（base64 一长串）"></textarea>
+          </label>
+          <details class="more">
+            <summary>高级：主密钥、盐、目录与分片</summary>
+            <div class="field-grid">
+              <label class="field">主密钥（可留空）<input id="fKey" placeholder="64 位 hex；导入同一把钥匙时填" autocomplete="off"></label>
+              <label class="field">盐（可留空）<input id="fSalt" placeholder="64 位 hex；与主密钥成对" autocomplete="off"></label>
+              <label class="field">密文根目录<input id="fRemoteN" placeholder="vault" value="vault" autocomplete="off"></label>
+              <label class="field">分片大小<input id="fChunkN" placeholder="500Mi" value="500Mi" autocomplete="off"></label>
+            </div>
+          </details>
+          <p id="nativeNote" class="hint">内置驱动直连云端，不需要外部 WebDAV。主密钥与盐留空＝新建一把钥匙，打不开云端已有密文。</p>
+          <div class="action-row">
+            <button id="btnSaveCloud" class="primary tap">保存并连接</button>
+            <span id="cloudMsg" class="status-text"></span>
+          </div>
+          <button id="btnNativeToggle" class="ghost tap hidden">换账号 / 导入</button>
+        </div>
+      </div>
+
+      <div id="webdavForm">
+        <div class="card">
+          <h3>WebDAV 连接</h3>
+          <div class="field-grid">
+            <label class="field">WebDAV 地址<input id="fUrl" placeholder="http://127.0.0.1:5244/dav" autocomplete="off"></label>
+            <label class="field">用户名<input id="fUser" placeholder="openlist 账号" autocomplete="off"></label>
+            <label class="field">密码<input id="fPass" type="password" placeholder="openlist 密码" autocomplete="off"></label>
+            <label class="field">密文根目录<input id="fRemote" placeholder="vault" value="vault" autocomplete="off"></label>
+            <label class="field">分片大小<input id="fChunk" placeholder="500Mi" value="500Mi" autocomplete="off"></label>
+          </div>
+          <div class="action-row">
+            <button id="btnSave" class="primary tap">保存并连接</button>
+            <span id="setupMsg" class="status-text"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== 外观 ========== -->
+    <div id="tabUI" class="tabpane hidden">
+      <div id="uiBox" class="card hidden">
+        <div class="card-head">
+          <div>
+            <h3>主题与界面</h3>
+            <p class="sub">深浅色、误删保护和列表显示。</p>
+          </div>
+        </div>
+        <div class="setting-row">
+          <span class="sr-t"><b>主题</b><em>默认跟随手机，也可固定在深色或浅色</em></span>
+          <div class="seg3" role="group" aria-label="主题">
+            <button id="btnThemeAuto" class="tap on">跟随</button>
+            <button id="btnThemeDark" class="tap">深色</button>
+            <button id="btnThemeLight" class="tap">浅色</button>
+          </div>
+        </div>
+        <div class="setting-row">
+          <span class="sr-t"><b>显示删除按钮（×）</b><em>关掉后只能长按删除，手滑也不怕</em></span>
+          <button id="btnShowDel" class="pill tap">显示删除按钮（×）：关</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <h3>预览缓存</h3>
+            <p class="sub">打开过的图片原图会加密存在本机，第二次打开不再走云端；超出上限自动清理最久没看的。</p>
+          </div>
+        </div>
+        <div class="setting-row">
+          <span class="sr-t"><b>已用空间</b><em id="cacheStat">正在读取…</em></span>
+          <button id="btnCacheClear" class="pill tap">清理缓存</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="setupFilesCard" class="card">
+      <div class="card-head">
+        <div>
+          <h3>网盘文件</h3>
+          <p class="sub" id="setupFilesPath">根目录</p>
+        </div>
+        <button id="btnSetupBrowse" class="ghost tap">打开网盘</button>
+      </div>
+      <div id="setupFiles" class="setup-files"><span class="muted">正在读取…</span></div>
+    </div>
+  </div>
+</div>
 
 <div id="viewer" class="viewer hidden">
   <div class="viewer-bar">
@@ -210,13 +419,46 @@
 
 <div id="toast" class="toast hidden"></div>
 
+<div id="busy" class="ask hidden">
+  <div class="ask-box busy-box">
+    <span class="spin"></span>
+    <p id="busyText">正在处理…</p>
+  </div>
+</div>
+
 <div id="ask" class="ask hidden">
   <div class="ask-box">
     <div id="askText" class="ask-text"></div>
     <input id="askInput" class="hidden" placeholder="输入名称" autocomplete="off">
     <div class="row">
-      <button id="askNo" class="primary tap">取消</button>
-      <button id="askYes" class="ghost tap">删除</button>
+      <button id="askNo" class="ghost tap">取消</button>
+      <button id="askYes" class="danger tap">删除</button>
+    </div>
+  </div>
+</div>
+
+<div id="lockScreen" class="lock-screen hidden">
+  <div class="lock-card">
+    <div class="lock-ico">🔒</div>
+    <h2 id="lockTitle">vaultd 已锁定</h2>
+    <p id="lockSub" class="sub">输入 PIN 解锁，或使用指纹</p>
+    <input id="lockPin" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="4–8 位 PIN">
+    <p id="lockErr" class="lock-err"></p>
+    <button id="lockUnlock" class="primary tap">解锁</button>
+    <button id="lockBio" class="ghost tap">指纹解锁</button>
+    <button id="lockCancel" class="ghost tap hidden">取消</button>
+  </div>
+</div>
+
+<div id="pinBox" class="ask hidden">
+  <div class="ask-box">
+    <div id="pinTitle" class="ask-text">设置 PIN</div>
+    <input id="pinInput" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="4–8 位数字">
+    <input id="pinConfirm" type="password" inputmode="numeric" autocomplete="off" maxlength="8" placeholder="再输入一次">
+    <p id="pinErr" class="lock-err"></p>
+    <div class="row">
+      <button id="pinNo" class="ghost tap">取消</button>
+      <button id="pinYes" class="primary tap">保存</button>
     </div>
   </div>
 </div>
@@ -224,4 +466,3 @@
 <script src="/app.js"></script>
 </body>
 </html>
-

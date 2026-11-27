@@ -445,8 +445,32 @@ func (c *Client) CreateDir(ctx context.Context, parentID, name string) (string, 
 	return r.Data.FileID, nil
 }
 
+// Move 把文件或整个目录移到另一个父目录（云端 /file/batchMove 是任务型接口）。
+// 目录移动由云端一次完成，不需要逐个搬子文件；文件名保持不变，改名要另调 Rename。
+func (c *Client) Move(ctx context.Context, fileIDs []string, toParentID string) (string, error) {
+	var r struct {
+		Success bool   `json:"success"`
+		Message string `json:"message"`
+		TaskID  string `json:"taskId"`
+		Data    struct {
+			TaskID string `json:"taskId"`
+		} `json:"data"`
+	}
+	body := map[string]any{"fileIds": fileIDs, "toParentFileId": toParentID}
+	if err := c.postPath(ctx, "/file/batchMove", body, &r); err != nil {
+		return "", err
+	}
+	if !r.Success {
+		return "", fmt.Errorf("移动失败: %s", r.Message)
+	}
+	if r.TaskID != "" {
+		return r.TaskID, nil
+	}
+	return r.Data.TaskID, nil
+}
+
 // Rename 原地改名（同目录），用于 chunker 把临时分片名改成最终名。
-// 云端只提供改名接口，跨目录移动需由调用方用「读+写+删」实现。
+// 跨目录请用 Move。
 func (c *Client) Rename(ctx context.Context, fileID, newName string) error {
 	var r struct {
 		Success bool   `json:"success"`

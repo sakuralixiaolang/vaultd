@@ -33,16 +33,28 @@ public class SyncBridge {
             o.put("gateway", !SyncPrefs.base(c).isEmpty());
             o.put("keepAlbum", SyncPrefs.keepAlbum(c));
             o.put("albums", new org.json.JSONArray(SyncPrefs.albums(c)));
+            o.put("folders", FolderSync.list(c));
+            o.put("folderDir", SyncPrefs.folderDir(c));
             o.put("contacts", SyncPrefs.contacts(c));
             o.put("sms", SyncPrefs.sms(c));
             o.put("calls", SyncPrefs.calls(c));
             o.put("hasContacts", has(c, Manifest.permission.READ_CONTACTS));
             o.put("hasSms", has(c, Manifest.permission.READ_SMS));
             o.put("hasCalls", has(c, Manifest.permission.READ_CALL_LOG));
+            o.put("running", SyncPrefs.progressRunning(c));
+            o.put("done", SyncPrefs.progressDone(c));
+            o.put("total", SyncPrefs.progressTotal(c));
+            o.put("current", SyncPrefs.progressCurrent(c));
             return o.toString();
         } catch (Exception e) {
             return "{\"error\":\"" + e.getMessage() + "\"}";
         }
+    }
+
+    /** 只读同步进度，1.5 秒轮询一次，别把相册清单和文件夹列表整包搬来搬去。 */
+    @JavascriptInterface
+    public String progress() {
+        return SyncPrefs.progressJson(act);
     }
 
     private static boolean has(Context c, String perm) {
@@ -76,7 +88,12 @@ public class SyncBridge {
     public String albums() {
         if (!hasMediaPermission(act)) return "[]";
         try {
-            return AutoSync.albumsJson(act);
+            return AutoSync.albumsJson(act, new AutoSync.CoverListener() {
+                @Override
+                public void onCover(String album, String dataUrl) {
+                    act.pushAlbumCover(album, dataUrl);
+                }
+            });
         } catch (Throwable t) {
             return "[]";
         }
@@ -104,6 +121,19 @@ public class SyncBridge {
         return state();
     }
 
+    /** 拉起系统目录选择器；选完在 onActivityResult 里记下，下次同步自动带上。 */
+    @JavascriptInterface
+    public String pickFolder() {
+        act.pickFolder();
+        return state();
+    }
+
+    @JavascriptInterface
+    public String removeFolder(String uri) {
+        FolderSync.removeFolder(act, uri == null ? "" : uri);
+        return state();
+    }
+
     @JavascriptInterface
     public String getTheme() {
         return SyncPrefs.theme(act);
@@ -120,13 +150,15 @@ public class SyncBridge {
 
     @JavascriptInterface
     public String setEnabled(boolean on) {
-        if (on && SyncPrefs.lastScanMark(act) == 0) {
-            // 第一次打开：从现在开始算，别把几百张旧照片一次全传上去
-            SyncPrefs.setLastScanMark(act, System.currentTimeMillis());
-        }
         SyncPrefs.setEnabled(act, on);
-        if (on) SyncService.start(act);
-        else SyncService.stop(act);
+        if (on) {
+            // 刚开启时由服务跑一轮「全量补齐」，把相册里已有、云端还没有的照片补上。
+            SyncPrefs.setProgress(act, true, 0, 0, "正在检查新照片…");
+            SyncService.start(act);
+        } else {
+            SyncService.stop(act);
+            SyncPrefs.setProgress(act, false, 0, 0, "");
+        }
         return state();
     }
 
@@ -144,12 +176,13 @@ public class SyncBridge {
 
     @JavascriptInterface
     public String syncNow() {
+        SyncPrefs.setProgress(act, true, 0, 0, "正在检查新照片…");
         new Thread(new Runnable() {
             @Override
             public void run() {
                 String msg;
                 try {
-                    AutoSync.Result r = AutoSync.run(act);
+                    AutoSync.Result r = AutoSync.run(act, true);
                     msg = r.msg;
                 } catch (Throwable t) {
                     msg = "同步异常：" + t.getMessage();
